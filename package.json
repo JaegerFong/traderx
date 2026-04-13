@@ -22,7 +22,9 @@
     "onCommand:traderx.openIntraday",
     "onCommand:traderx.openIntradayPickPlatform",
     "onCommand:traderx.openGroupManage",
-    "onCommand:traderx.openSettings"
+    "onCommand:traderx.openSettings",
+    "onCommand:traderx.openMarket",
+    "onCommand:traderx.openMarketPanel"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -88,6 +90,29 @@
       {
         "command": "traderx.openSettings",
         "title": "TraderX: 全局设置"
+      },
+      {
+        "command": "traderx.openMarket",
+        "title": "TraderX: 市场行情"
+      },
+      {
+        "command": "traderx.openMarketPanel",
+        "title": "TraderX: 打开市场榜单面板"
+      },
+      {
+        "command": "traderx.toggleBossMode",
+        "title": "TraderX: 切换老板模式（市场行情置灰）"
+      },
+      {
+        "command": "traderx.debugNxfxbSnapshot",
+        "title": "TraderX: 输出 NXFXB 对照快照"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "traderx.toggleBossMode",
+        "key": "ctrl+alt+b",
+        "when": "editorTextFocus || view == traderx.watchlistView"
       }
     ],
     "configuration": {
@@ -146,6 +171,16 @@
           ],
           "default": "eastmoney_full",
           "description": "行情页站点：东方财富完整行情（PC 个股页）或东方财富低调模式（basic/h5chart-iframe，与韭菜盒子 LeekFund 一致）。历史 eastmoney/sina/tencent 将映射为完整行情"
+        },
+        "traderx.bossMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "老板模式：仅将“市场行情”模块置灰并禁用交互（自选栏不受影响）"
+        },
+        "traderx.networkProxy": {
+          "type": "string",
+          "default": "",
+          "description": "网络代理（可选）：例如 http://127.0.0.1:7890 ，用于在部分网络环境下访问受限域名"
         }
       }
     }
@@ -156,6 +191,7 @@
     "watch": "tsc -watch -p ./"
   },
   "dependencies": {
+    "https-proxy-agent": "^9.0.0",
     "iconv-lite": "^0.6.3"
   },
   "devDependencies": {

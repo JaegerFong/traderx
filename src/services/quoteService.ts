@@ -65,18 +65,9 @@ function getQuoteProviderOrder(): Array<'sina' | 'tencent'> {
 }
 
 async function fetchMergedBaseQuotes(codes: NormalizedCode[]): Promise<Map<string, RawQuote>> {
-  let sinaMap = new Map<string, RawQuote>();
-  let tencentMap = new Map<string, RawQuote>();
-  try {
-    sinaMap = await fetchSinaQuotes(codes);
-  } catch {
-    sinaMap = new Map();
-  }
-  try {
-    tencentMap = await fetchTencentQuotes(codes);
-  } catch {
-    tencentMap = new Map();
-  }
+  const [sinaRes, tencentRes] = await Promise.allSettled([fetchSinaQuotes(codes), fetchTencentQuotes(codes)]);
+  const sinaMap = sinaRes.status === 'fulfilled' ? sinaRes.value : new Map<string, RawQuote>();
+  const tencentMap = tencentRes.status === 'fulfilled' ? tencentRes.value : new Map<string, RawQuote>();
   return mergeFromProviders(codes, getQuoteProviderOrder(), { sina: sinaMap, tencent: tencentMap });
 }
 

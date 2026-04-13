@@ -37,3 +37,62 @@ export interface RawQuote {
   amountYuan: number | null;
   prevClose: number | null;
 }
+
+export interface MarketOverview {
+  /** 上涨家数 */
+  upCount: number | null;
+  /** 下跌家数 */
+  downCount: number | null;
+  /** 平盘家数 */
+  flatCount: number | null;
+  /** 全市场成交额（元） */
+  turnoverYuan: number | null;
+}
+
+export type IndexId = 'sh000001' | 'sz399001' | 'sz399006' | 'sh000688';
+
+export interface IndexQuote {
+  id: IndexId;
+  name: string;
+  price: number | null;
+  changePct: number | null;
+  /** 成交额（元），若接口无则为 null */
+  amountYuan: number | null;
+}
+
+/** 通用榜单行（概念/板块/股票Top） */
+export interface RankRow {
+  code: string;
+  name: string;
+  price: number | null;
+  changePct: number | null;
+  /** 成交额（元） */
+  amountYuan: number | null;
+}
+
+/** 涨停/跌停榜单行 */
+export interface LimitRow extends RankRow {
+  /** 涨停/跌停时间（例如 HH:MM:SS 或 HH:MM） */
+  limitTime: string | null;
+}
+
+export interface ConceptItem {
+  code: string;
+  name: string;
+}
+
+export type MarketListKind =
+  | 'topConcepts'
+  | 'topIndustries'
+  | 'limitUp'
+  | 'limitDown'
+  | 'conceptTopStocks';
+
+export interface MarketState {
+  overview: MarketOverview | null;
+  indices: IndexQuote[];
+  lists: Partial<Record<MarketListKind, { rows: Array<RankRow | LimitRow>; loading: boolean; error?: string }>>;
+  conceptQuery?: string;
+  conceptPicked?: ConceptItem | null;
+  conceptSuggest?: { items: ConceptItem[]; loading: boolean; error?: string };
+}

@@ -3,6 +3,8 @@ import { QuoteService } from './services/quoteService';
 import { WatchlistStore } from './storage/watchlistStore';
 import type { NormalizedCode } from './stockCode';
 import type { QuoteRow } from './types';
+import { fetchEastmoneyMainForceOne, mapLimit } from './providers/eastmoney';
+import { fetchNxfxbHotTheme, fetchNxfxbHsgtSeries, fetchNxfxbUpDownData } from './providers/leekNxfxb';
 
 export class WatchlistViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewId = 'traderx.watchlistView';
@@ -11,6 +13,9 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
   private refreshTimer?: ReturnType<typeof setInterval>;
   private seq = 0;
   private registeredConfigListener = false;
+  private rowCache = new Map<string, QuoteRow>();
+  private nxfxbInited = false;
+  private nxfxbQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
@@ -52,7 +57,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
         vscode.workspace.onDidChangeConfiguration((e) => {
           if (e.affectsConfiguration('traderx')) {
             this.applyRefreshSchedule();
-            void this.postRows('config');
+            // 配置变更（尤其是全局设置保存）不应阻塞在全量行情刷新上
+            this.refreshUiOnly('config');
           }
         }),
       );
@@ -77,6 +83,59 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
 
   public async refresh(reason = 'external'): Promise<void> {
     await this.postRows(reason);
+  }
+
+  /** 仅同步 UI 状态（不重新拉行情），用于配置保存等场景 */
+  public refreshUiOnly(reason = 'ui'): void {
+    this.postRowsFromCache(reason);
+  }
+
+  public async addStockIncremental(code: NormalizedCode): Promise<void> {
+    await this.postPatchAddToActiveGroup(code, 'addStock');
+  }
+
+  public async removeStockIncremental(code: NormalizedCode): Promise<void> {
+    await this.postPatchRemoveFromActiveGroup(code, 'removeStock');
+  }
+
+  public async editPositionIncremental(code: NormalizedCode): Promise<void> {
+    await this.postPatchRefreshOne(code, 'editPosition');
+  }
+
+  private postRowsFromCache(reason: string): void {
+    const codes = this.store.getCodesForActiveGroup();
+    const positions = this.store.getPositions();
+    const groups = this.store.getGroups().map((g) => ({ id: g.id, name: g.name, count: g.codes.length }));
+    const turnoverDisplay = (vscode.workspace.getConfiguration('traderx').get<string>('turnoverDisplay') ?? 'yi') as 'wan' | 'yi';
+    const stealthMode = vscode.workspace.getConfiguration('traderx').get<boolean>('intradayStealthMode') === true;
+    const gid = this.store.getActiveGroupId();
+    const sort = this.store.getSortForGroup(gid);
+
+    const rows: QuoteRow[] =
+      codes.length === 0
+        ? []
+        : codes.map((c) => {
+            const cached = this.rowCache.get(c);
+            if (cached) {
+              const pos = positions[c];
+              return { ...cached, cost: pos?.cost, shares: pos?.shares };
+            }
+            return this.buildSkeletonRows([c], positions)[0]!;
+          });
+
+    this.view?.webview.postMessage({
+      type: 'update',
+      reason,
+      rows,
+      turnoverDisplay,
+      updatedAt: Date.now(),
+      groups,
+      activeGroupId: gid,
+      quotesLoading: false,
+      stealthMode,
+      sortKey: sort.key,
+      sortDir: sort.dir,
+    });
   }
 
   private buildSkeletonRows(
@@ -169,23 +228,179 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    let full: QuoteRow[];
-    try {
-      full = await this.quoteService.enrichMainForce(codes, basic);
-    } catch (e) {
-      push({
-        rows: basic,
-        error: e instanceof Error ? e.message : String(e),
-        quotesLoading: false,
-        reasonSuffix: '-err-main',
-      });
-      return;
+    // 基础行情先展示（不等待主力净流入），提升首屏速度
+    this.rowCache.clear();
+    for (const r of basic) {
+      this.rowCache.set(r.code, r);
     }
+    push({ rows: basic, quotesLoading: true, reasonSuffix: '-basic' });
 
     if (my !== this.seq) {
       return;
     }
-    push({ rows: full, quotesLoading: false, reasonSuffix: '' });
+
+    // 主力净流入后台并发补齐：每拿到一只就 patch 该行
+    void this.enrichMainForceStreaming(codes, basic, my);
+  }
+
+  private async enrichMainForceStreaming(codes: NormalizedCode[], baseRows: QuoteRow[], seqToken: number): Promise<void> {
+    if (codes.length === 0) {
+      return;
+    }
+
+    const extras = await mapLimit(codes, 8, async (code) => fetchEastmoneyMainForceOne(code));
+    if (seqToken !== this.seq) {
+      return;
+    }
+
+    const upserts: QuoteRow[] = [];
+    for (let i = 0; i < codes.length; i++) {
+      const prev = baseRows[i]!;
+      const em = extras[i]!;
+      const errors = [...(prev.errors ?? [])];
+      const filtered = errors.filter((e) => e !== '主力净流入暂不可用');
+      if (em.mainNetInflowWan === null) {
+        filtered.push('主力净流入暂不可用');
+      }
+      const patched: QuoteRow = {
+        ...prev,
+        mainNetInflowWan: em.mainNetInflowWan,
+        errors: filtered.length ? filtered : undefined,
+      };
+      this.rowCache.set(patched.code, patched);
+      upserts.push(patched);
+    }
+
+    // 一次 patch 推送全部更新（4 只股票也足够快）；可避免多次 render 抖动
+    this.postPatch({ reason: 'mainforce', upserts, quotesLoading: false });
+  }
+
+  private getUiStateSnapshot(): {
+    groups: { id: string; name: string; count: number }[];
+    activeGroupId: string;
+    turnoverDisplay: 'wan' | 'yi';
+    stealthMode: boolean;
+    sortKey: string;
+    sortDir: number;
+  } {
+    const groups = this.store.getGroups().map((g) => ({ id: g.id, name: g.name, count: g.codes.length }));
+    const activeGroupId = this.store.getActiveGroupId();
+    const turnoverDisplay = (vscode.workspace.getConfiguration('traderx').get<string>('turnoverDisplay') ?? 'yi') as 'wan' | 'yi';
+    const stealthMode = vscode.workspace.getConfiguration('traderx').get<boolean>('intradayStealthMode') === true;
+    const sort = this.store.getSortForGroup(activeGroupId);
+    return { groups, activeGroupId, turnoverDisplay, stealthMode, sortKey: sort.key, sortDir: sort.dir };
+  }
+
+  private postPatch(payload: {
+    reason: string;
+    upserts?: QuoteRow[];
+    removes?: NormalizedCode[];
+    quotesLoading?: boolean;
+    error?: string;
+  }): void {
+    const snap = this.getUiStateSnapshot();
+    this.view?.webview.postMessage({
+      type: 'patch',
+      reason: payload.reason,
+      upserts: payload.upserts ?? [],
+      removes: payload.removes ?? [],
+      quotesLoading: !!payload.quotesLoading,
+      error: payload.error,
+      updatedAt: Date.now(),
+      groups: snap.groups,
+      activeGroupId: snap.activeGroupId,
+      turnoverDisplay: snap.turnoverDisplay,
+      stealthMode: snap.stealthMode,
+      sortKey: snap.sortKey,
+      sortDir: snap.sortDir,
+    });
+  }
+
+  private async postPatchAddToActiveGroup(code: NormalizedCode, reason: string): Promise<void> {
+    const my = ++this.seq;
+    const positions = this.store.getPositions();
+    const skeleton = this.buildSkeletonRows([code], positions)[0]!;
+    this.rowCache.set(code, skeleton);
+    this.postPatch({ reason: `${reason}-skeleton`, upserts: [skeleton], quotesLoading: true });
+
+    try {
+      const full = await this.quoteService.fetchRows([code], positions);
+      if (my !== this.seq) {
+        return;
+      }
+      const r = full[0]!;
+      this.rowCache.set(code, r);
+      this.postPatch({ reason, upserts: [r], quotesLoading: false });
+    } catch (e) {
+      if (my !== this.seq) {
+        return;
+      }
+      this.postPatch({
+        reason: `${reason}-err`,
+        upserts: [skeleton],
+        quotesLoading: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  private async postPatchRemoveFromActiveGroup(code: NormalizedCode, reason: string): Promise<void> {
+    ++this.seq;
+    this.rowCache.delete(code);
+    this.postPatch({ reason, removes: [code], quotesLoading: false });
+  }
+
+  private async postPatchRefreshOne(code: NormalizedCode, reason: string): Promise<void> {
+    const my = ++this.seq;
+    const positions = this.store.getPositions();
+    const cached = this.rowCache.get(code);
+    const fallback = cached ?? this.buildSkeletonRows([code], positions)[0]!;
+
+    // 持仓编辑：优先本地重算盈亏，减少一次网络请求；若价格未知再补网络
+    const canLocal =
+      cached &&
+      typeof cached.price === 'number' &&
+      cached.price !== null &&
+      positions[code] !== undefined;
+
+    if (canLocal) {
+      const pos = positions[code]!;
+      const cost = pos?.cost;
+      const shares = pos?.shares;
+      let pnlYuan: number | null = null;
+      let pnlPct: number | null = null;
+      if (cached.price !== null && cost !== undefined && shares !== undefined && shares > 0) {
+        pnlYuan = (cached.price - cost) * shares;
+        if (cost !== 0) {
+          pnlPct = ((cached.price - cost) / cost) * 100;
+        }
+      }
+      const patched: QuoteRow = { ...cached, cost, shares, pnlYuan, pnlPct };
+      this.rowCache.set(code, patched);
+      this.postPatch({ reason: `${reason}-local`, upserts: [patched], quotesLoading: false });
+      return;
+    }
+
+    this.postPatch({ reason: `${reason}-loading`, upserts: [fallback], quotesLoading: true });
+    try {
+      const full = await this.quoteService.fetchRows([code], positions);
+      if (my !== this.seq) {
+        return;
+      }
+      const r = full[0]!;
+      this.rowCache.set(code, r);
+      this.postPatch({ reason, upserts: [r], quotesLoading: false });
+    } catch (e) {
+      if (my !== this.seq) {
+        return;
+      }
+      this.postPatch({
+        reason: `${reason}-err`,
+        upserts: [fallback],
+        quotesLoading: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
 
   private async onMessage(msg: Record<string, unknown>): Promise<void> {
@@ -201,7 +416,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     }
     if (type === 'removeStock' && typeof msg.code === 'string') {
       await this.store.removeCodeFromGroup(this.store.getActiveGroupId(), msg.code);
-      await this.refresh('remove');
+      await this.postPatchRemoveFromActiveGroup(msg.code as NormalizedCode, 'remove');
       return;
     }
     if (type === 'openGroupManage') {
@@ -210,6 +425,39 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     }
     if (type === 'openSettings') {
       await vscode.commands.executeCommand('traderx.openSettings');
+      return;
+    }
+    if (type === 'openMarket') {
+      await vscode.commands.executeCommand('traderx.openMarket');
+      return;
+    }
+    if (type === 'nxfxb.init') {
+      if (this.nxfxbInited) {
+        return;
+      }
+      this.nxfxbInited = true;
+      void this.loadNxfxb('init');
+      return;
+    }
+    if (type === 'nxfxb.refresh') {
+      void this.loadNxfxb('refresh');
+      return;
+    }
+    if (type === 'market.openPanel' && typeof msg.kind === 'string') {
+      await vscode.commands.executeCommand('traderx.openMarketPanel', msg.kind);
+      return;
+    }
+    if (type === 'clearPosition' && typeof msg.code === 'string') {
+      const code = msg.code as NormalizedCode;
+      const cur = this.store.getPositions()[code];
+      const shares = cur?.shares;
+      if (shares === undefined || !Number.isFinite(shares) || shares <= 0) {
+        vscode.window.showInformationMessage('当前未记录有效持仓，无需清仓');
+        return;
+      }
+      await this.store.setPosition(code, { cost: undefined, shares: undefined });
+      vscode.window.showInformationMessage(`已清仓：${code}`);
+      await this.editPositionIncremental(code);
       return;
     }
     if (type === 'copyStock' && typeof msg.code === 'string') {
@@ -232,7 +480,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       } else if (r === 'ok') {
         vscode.window.showInformationMessage('已复制到其他分组');
       }
-      await this.refresh('copy');
+      ++this.seq;
+      this.postPatch({ reason: 'copy', quotesLoading: false });
       return;
     }
     if (type === 'moveStock' && typeof msg.code === 'string') {
@@ -255,7 +504,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       } else if (r === 'ok') {
         vscode.window.showInformationMessage('已移动到其他分组');
       }
-      await this.refresh('move');
+      await this.postPatchRemoveFromActiveGroup(msg.code as NormalizedCode, 'move');
       return;
     }
     if (type === 'openIntraday' && typeof msg.code === 'string') {
@@ -275,6 +524,46 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       await this.store.setSortForGroup(gid, { key: msg.sortKey, dir: msg.sortDir as number });
       return;
     }
+  }
+
+  private postNxfxb(payload: { upDown: unknown; hotTheme: unknown; hsgtSeries: unknown; updatedAt: number; error?: string }): void {
+    const bossMode = vscode.workspace.getConfiguration('traderx').get<boolean>('bossMode') === true;
+    this.view?.webview.postMessage({ type: 'nxfxbUpdate', bossMode, ...payload });
+  }
+
+  private async loadNxfxb(reason: string): Promise<void> {
+    this.nxfxbQueue = this.nxfxbQueue.then(async () => {
+      this.postNxfxb({ upDown: null, hotTheme: [], hsgtSeries: [], updatedAt: Date.now(), error: '' });
+      try {
+        const [upDownRes, hotThemeRes, hsgtRes] = await Promise.allSettled([
+          fetchNxfxbUpDownData(),
+          fetchNxfxbHotTheme(),
+          fetchNxfxbHsgtSeries(),
+        ]);
+
+        const upDown = upDownRes.status === 'fulfilled' ? upDownRes.value : null;
+        const hotTheme = hotThemeRes.status === 'fulfilled' ? hotThemeRes.value : [];
+        const hsgtSeries = hsgtRes.status === 'fulfilled' ? hsgtRes.value : [];
+
+        let err = '';
+        for (const r of [upDownRes, hotThemeRes, hsgtRes]) {
+          if (r.status === 'rejected') {
+            const m = r.reason instanceof Error ? r.reason.message : String(r.reason);
+            err = err ? `${err}; ${m}` : m;
+          }
+        }
+        this.postNxfxb({ upDown, hotTheme, hsgtSeries, updatedAt: Date.now(), error: err ? `[${reason}] ${err}` : '' });
+      } catch (e) {
+        this.postNxfxb({
+          upDown: null,
+          hotTheme: [],
+          hsgtSeries: [],
+          updatedAt: Date.now(),
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    });
+    await this.nxfxbQueue;
   }
 
   private buildHtml(webview: vscode.Webview, nonce: string): string {
@@ -297,6 +586,15 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       --border: var(--vscode-panel-border, rgba(128,128,128,.35));
       --muted: var(--vscode-descriptionForeground);
       --bg-header: var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04));
+      /** 冻结前 4 列宽度（与 left 累加一致） */
+      --freeze-w1: 72px;
+      /** 名称列：默认更紧凑（约 4 个中文字符） */
+      --freeze-w2: 72px;
+      --freeze-w3: 64px;
+      --freeze-w4: 72px;
+      --freeze-l2: var(--freeze-w1);
+      --freeze-l3: calc(var(--freeze-w1) + var(--freeze-w2));
+      --freeze-l4: calc(var(--freeze-w1) + var(--freeze-w2) + var(--freeze-w3));
     }
     body {
       margin: 0;
@@ -370,6 +668,35 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       margin: 6px 0;
       white-space: pre-wrap;
     }
+    .boss-wrap {
+      position: relative;
+    }
+    .boss-wrap.boss-mode {
+      filter: grayscale(1) contrast(.9) brightness(.92);
+    }
+    .boss-wrap.boss-mode .boss-overlay {
+      display: block;
+    }
+    .boss-overlay {
+      display: none;
+      position: absolute;
+      inset: 0;
+      background: color-mix(in srgb, var(--vscode-editor-background) 55%, transparent);
+      border-radius: 4px;
+      pointer-events: all;
+      cursor: not-allowed;
+    }
+    .boss-overlay .boss-text {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      font-size: 11px;
+      color: var(--muted);
+      background: color-mix(in srgb, var(--vscode-editor-background) 85%, transparent);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 8px;
+    }
     .table-wrap {
       overflow: auto;
       border: 1px solid var(--border);
@@ -377,12 +704,14 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     }
     table {
       width: 100%;
-      border-collapse: collapse;
+      border-collapse: separate;
+      border-spacing: 0;
       min-width: 980px;
     }
     thead th {
       position: sticky;
       top: 0;
+      z-index: 3;
       background: var(--bg-header);
       border-bottom: 1px solid var(--border);
       text-align: left;
@@ -390,6 +719,58 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       cursor: pointer;
       user-select: none;
       white-space: nowrap;
+      /** 列宽拖拽把手用 */
+      position: sticky;
+    }
+    /** 前 4 列横向滚动时固定；表头角块需盖住下方冻结单元格 */
+    thead th:nth-child(1),
+    tbody td:nth-child(1) {
+      position: sticky;
+      left: 0;
+      box-sizing: border-box;
+      width: var(--freeze-w1);
+      min-width: var(--freeze-w1);
+      max-width: var(--freeze-w1);
+    }
+    thead th:nth-child(2),
+    tbody td:nth-child(2) {
+      position: sticky;
+      left: var(--freeze-l2);
+      box-sizing: border-box;
+      width: var(--freeze-w2);
+      min-width: var(--freeze-w2);
+      max-width: var(--freeze-w2);
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    thead th:nth-child(3),
+    tbody td:nth-child(3) {
+      position: sticky;
+      left: var(--freeze-l3);
+      box-sizing: border-box;
+      width: var(--freeze-w3);
+      min-width: var(--freeze-w3);
+      max-width: var(--freeze-w3);
+    }
+    thead th:nth-child(4),
+    tbody td:nth-child(4) {
+      position: sticky;
+      left: var(--freeze-l4);
+      box-sizing: border-box;
+      width: var(--freeze-w4);
+      min-width: var(--freeze-w4);
+      max-width: var(--freeze-w4);
+      box-shadow: 6px 0 10px -6px rgba(0, 0, 0, 0.18);
+    }
+    thead th:nth-child(-n+4) {
+      z-index: 6;
+    }
+    tbody td:nth-child(-n+4) {
+      z-index: 2;
+      background: var(--vscode-editor-background);
+    }
+    tbody tr:hover td:nth-child(-n+4) {
+      background: var(--vscode-list-hoverBackground);
     }
     thead th[data-k] .sort-ind {
       display: inline-block;
@@ -411,6 +792,23 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       padding: 6px 8px;
       white-space: nowrap;
     }
+    /** 表头拖拽调整列宽 */
+    thead th {
+      position: sticky;
+    }
+    thead th .col-resizer {
+      position: absolute;
+      top: 0;
+      right: -2px;
+      width: 6px;
+      height: 100%;
+      cursor: col-resize;
+      user-select: none;
+      touch-action: none;
+    }
+    thead th .col-resizer:hover {
+      background: color-mix(in srgb, var(--vscode-focusBorder) 25%, transparent);
+    }
     tbody tr:hover td {
       background: var(--vscode-list-hoverBackground);
     }
@@ -425,7 +823,13 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       margin-right: 6px;
       padding: 2px 6px;
       font-size: 11px;
+      width: 26px;
+      height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
+    .actions button svg { display: block; }
     .empty {
       padding: 16px;
       color: var(--muted);
@@ -437,51 +841,102 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       padding: 8px;
       color: var(--muted);
     }
+    details.reserve:first-of-type {
+      margin-top: 0;
+    }
     details.reserve summary {
       cursor: pointer;
       font-weight: 600;
       color: var(--vscode-foreground);
     }
+
   </style>
 </head>
 <body>
-  <div class="bar-row">
-    <label for="groupSelect" class="meta" style="flex-shrink:0;">分组</label>
-    <div class="flex-grow">
-      <select id="groupSelect" aria-label="切换分组"></select>
+  <details class="reserve" id="marketEntryDetails">
+    <summary>市场行情</summary>
+    <div class="boss-wrap" id="marketBossWrap">
+      <div class="boss-overlay"><div class="boss-text">老板模式：已置灰</div></div>
+      <div class="meta" id="nxfxbMeta" style="margin-top:6px;">加载中…</div>
+      <div class="error" id="nxfxbErr" style="display:none"></div>
+      <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div style="border:1px solid var(--border);border-radius:4px;padding:8px;">
+          <div class="meta">涨跌家数</div>
+          <div id="nxfxbUpDown" style="margin-top:6px;line-height:1.8">—</div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:4px;padding:8px;">
+          <div class="meta">热门主题</div>
+          <div id="nxfxbHotTheme" style="margin-top:6px;line-height:1.8">—</div>
+        </div>
+      </div>
+      <div class="more-actions" style="margin-top:10px;">
+        <button type="button" class="secondary" data-open-panel="topConcepts">概念Top10</button>
+        <button type="button" class="secondary" data-open-panel="topIndustries">板块Top10</button>
+        <button type="button" class="secondary" data-open-panel="limitUp">涨停</button>
+        <button type="button" class="secondary" data-open-panel="limitDown">跌停</button>
+        <button type="button" class="secondary" data-open-panel="conceptTopStocks">指定概念Top10</button>
+        <button type="button" id="btnNxfxbRefresh">刷新</button>
+      </div>
     </div>
-    <button type="button" class="icon-btn" id="btnAdd" title="添加自选" aria-label="添加自选">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-    </button>
-    <button type="button" class="icon-btn secondary" id="btnRefresh" title="刷新行情" aria-label="刷新行情">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M13 6a6 6 0 00-9.9-3.5M3 10a6 6 0 009.9 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12 2v4h-4M4 14v-4h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    </button>
-  </div>
-  <div class="meta-line"><span class="meta" id="meta"></span></div>
-  <div class="error" id="err" style="display:none"></div>
-  <div id="empty" class="empty" style="display:none">暂无自选。点击「添加自选」开始。</div>
-  <div class="table-wrap" id="wrap" style="display:none">
-    <table>
-      <thead>
-        <tr>
-          <th data-k="code">代码<span class="sort-ind" aria-hidden="true"></span></th>
-          <th data-k="name">名称<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="price">现价<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="changePct">涨跌幅<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="mainNetInflowWan">主力净流入(万)<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="high">最高<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="low">最低<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="amountYuan">成交额<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="cost">成本<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="shares">持仓<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="pnlYuan">盈亏(元)<span class="sort-ind" aria-hidden="true"></span></th>
-          <th class="right" data-k="pnlPct">盈亏%<span class="sort-ind" aria-hidden="true"></span></th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody id="tbody"></tbody>
-    </table>
-  </div>
+  </details>
+
+  <details class="reserve" id="watchlistDetails" open>
+    <summary>自选栏</summary>
+    <div class="watchlist-body">
+      <div class="bar-row">
+        <label for="groupSelect" class="meta" style="flex-shrink:0;">分组</label>
+        <div class="flex-grow">
+          <select id="groupSelect" aria-label="切换分组"></select>
+        </div>
+        <button type="button" class="icon-btn" id="btnAdd" title="添加自选" aria-label="添加自选">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+        <button type="button" class="icon-btn secondary" id="btnRefresh" title="刷新行情" aria-label="刷新行情">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M13 6a6 6 0 00-9.9-3.5M3 10a6 6 0 009.9 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12 2v4h-4M4 14v-4h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+      <div class="meta-line"><span class="meta" id="meta"></span></div>
+      <div class="error" id="err" style="display:none"></div>
+      <div id="empty" class="empty" style="display:none">暂无自选。点击「添加自选」开始。</div>
+      <div class="table-wrap" id="wrap" style="display:none">
+        <table>
+          <colgroup id="cols">
+            <col style="width:72px" />
+            <col style="width:72px" />
+            <col style="width:64px" />
+            <col style="width:72px" />
+            <col style="width:128px" />
+            <col style="width:64px" />
+            <col style="width:64px" />
+            <col style="width:96px" />
+            <col style="width:64px" />
+            <col style="width:64px" />
+            <col style="width:84px" />
+            <col style="width:72px" />
+            <col style="width:168px" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th data-k="code">代码<span class="sort-ind" aria-hidden="true"></span></th>
+              <th data-k="name">名称<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="price">现价<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="changePct">涨跌幅<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="mainNetInflowWan">主力净流入(万)<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="high">最高<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="low">最低<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="amountYuan">成交额<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="cost">成本<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="shares">持仓<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="pnlYuan">盈亏(元)<span class="sort-ind" aria-hidden="true"></span></th>
+              <th class="right" data-k="pnlPct">盈亏%<span class="sort-ind" aria-hidden="true"></span></th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </details>
 
   <details class="reserve">
     <summary>更多功能</summary>
@@ -508,6 +963,154 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     let turnoverDisplay = 'yi';
     let sortKey = 'code';
     let sortDir = 1;
+    let userSorted = false;
+    let skipSortOnce = true;
+
+    // ---------------- NXFXB（LeekFund 同口径） ----------------
+    let nxfxb = { upDown: null, hotTheme: [], hsgtSeries: [], updatedAt: Date.now(), error: '', bossMode: false };
+
+    function fmt2(n) {
+      if (n === null || n === undefined || Number.isNaN(n)) return '—';
+      return Number(n).toFixed(2);
+    }
+
+    function renderNxfxb() {
+      const meta = document.getElementById('nxfxbMeta');
+      const err = document.getElementById('nxfxbErr');
+      const ud = document.getElementById('nxfxbUpDown');
+      const ht = document.getElementById('nxfxbHotTheme');
+      const bw = document.getElementById('marketBossWrap');
+      if (!meta || !err || !ud || !ht) return;
+      if (bw) bw.classList.toggle('boss-mode', !!nxfxb.bossMode);
+
+      if (nxfxb.error) {
+        err.style.display = 'block';
+        err.textContent = nxfxb.error;
+      } else {
+        err.style.display = 'none';
+        err.textContent = '';
+      }
+      meta.textContent = '更新：' + new Date(nxfxb.updatedAt || Date.now()).toLocaleTimeString();
+
+      const u = nxfxb.upDown;
+      if (u && typeof u === 'object') {
+        const up = u.up ?? '—';
+        const down = u.down ?? '—';
+        const r0 = u.r0 ?? null;
+        ud.innerHTML =
+          '上涨：' + up + ' / 下跌：' + down +
+          '<br/>平均涨幅：' + (r0 === null ? '—' : fmt2((Number(r0) || 0) * 100)) + '%';
+      } else {
+        ud.textContent = '—';
+      }
+
+      const list = Array.isArray(nxfxb.hotTheme) ? nxfxb.hotTheme : [];
+      if (list.length) {
+        ht.innerHTML = list.slice(0, 6).map((x) => {
+          const name = x.SecurityName || x.CategoryName || '—';
+          const pct = x.SZDF ?? x.CZDF ?? null;
+          const cls = pct === null ? '' : (pct > 0 ? 'cn-up' : (pct < 0 ? 'cn-down' : ''));
+          const pctTxt = pct === null ? '—' : fmt2(pct) + '%';
+          return '<div style="display:flex;justify-content:space-between;gap:8px;"><span>' + String(name) + '</span><span class="' + cls + '">' + pctTxt + '</span></div>';
+        }).join('');
+      } else {
+        ht.textContent = '—';
+      }
+    }
+
+    function getColEls() {
+      const cg = document.getElementById('cols');
+      if (!cg) return [];
+      return Array.from(cg.querySelectorAll('col'));
+    }
+
+    function readPx(s) {
+      if (!s) return null;
+      const m = String(s).match(/(\\d+(?:\\.\\d+)?)px/);
+      if (!m) return null;
+      return Number(m[1]);
+    }
+
+    function setFreezeWidthVar(idx, px) {
+      const root = document.documentElement;
+      if (idx === 0) root.style.setProperty('--freeze-w1', px + 'px');
+      if (idx === 1) root.style.setProperty('--freeze-w2', px + 'px');
+      if (idx === 2) root.style.setProperty('--freeze-w3', px + 'px');
+      if (idx === 3) root.style.setProperty('--freeze-w4', px + 'px');
+    }
+
+    function loadColumnWidths() {
+      if (!vscode.getState) return;
+      const st = vscode.getState() || {};
+      if (!Array.isArray(st.colWidths)) return;
+      const cols = getColEls();
+      for (let i = 0; i < cols.length && i < st.colWidths.length; i++) {
+        const w = st.colWidths[i];
+        if (typeof w === 'number' && Number.isFinite(w) && w > 20) {
+          cols[i].style.width = w + 'px';
+          if (i < 4) setFreezeWidthVar(i, w);
+        }
+      }
+    }
+
+    function saveColumnWidths() {
+      if (!vscode.setState) return;
+      const cols = getColEls();
+      const widths = cols.map((c) => {
+        const w = readPx(c.style.width) ?? c.getBoundingClientRect().width;
+        return Math.round(w);
+      });
+      const st = (vscode.getState && vscode.getState()) || {};
+      vscode.setState({ ...st, colWidths: widths });
+    }
+
+    function setupResizableHeaders() {
+      const ths = Array.from(document.querySelectorAll('thead th'));
+      const cols = getColEls();
+      if (ths.length === 0 || cols.length === 0) return;
+
+      ths.forEach((th, i) => {
+        th.style.position = 'sticky';
+        const h = document.createElement('span');
+        h.className = 'col-resizer';
+        h.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const startX = e.clientX;
+          const startW = cols[i]?.getBoundingClientRect().width ?? th.getBoundingClientRect().width;
+          const minW = i === 1 ? 56 : 44;
+
+          function onMove(ev) {
+            const dx = ev.clientX - startX;
+            const w = Math.max(minW, Math.round(startW + dx));
+            if (cols[i]) cols[i].style.width = w + 'px';
+            if (i < 4) setFreezeWidthVar(i, w);
+          }
+
+          function onUp() {
+            window.removeEventListener('mousemove', onMove, true);
+            window.removeEventListener('mouseup', onUp, true);
+            saveColumnWidths();
+          }
+
+          window.addEventListener('mousemove', onMove, true);
+          window.addEventListener('mouseup', onUp, true);
+        });
+        th.appendChild(h);
+      });
+    }
+
+    function applyPatch(upserts, removes) {
+      const rmSet = new Set(removes || []);
+      let next = rows.filter((r) => !rmSet.has(r.code));
+      const by = new Map(next.map((r) => [r.code, r]));
+      for (const r of (upserts || [])) {
+        if (!r || !r.code) continue;
+        by.set(r.code, r);
+      }
+      next = Array.from(by.values());
+      rows = next;
+    }
 
     function fillGroupSelect() {
       const sel = document.getElementById('groupSelect');
@@ -537,6 +1140,33 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       if (pct > 0) return 'cn-up';
       if (pct < 0) return 'cn-down';
       return '';
+    }
+
+    /** 鼠标悬浮行时展示与表格一致的全部字段（多行） */
+    function rowTooltipText(r) {
+      const lines = [
+        '代码：' + (r.code ?? '—'),
+        '名称：' + (r.name ?? '—'),
+        '现价：' + fmtNum(r.price, 2),
+        '涨跌幅%：' + fmtNum(r.changePct, 2),
+      ];
+      if (r.prevClose !== null && r.prevClose !== undefined && !Number.isNaN(r.prevClose)) {
+        lines.push('昨收：' + fmtNum(r.prevClose, 2));
+      }
+      lines.push(
+        '主力净流入(万)：' + fmtNum(r.mainNetInflowWan, 2),
+        '最高：' + fmtNum(r.high, 2),
+        '最低：' + fmtNum(r.low, 2),
+        '成交额：' + fmtAmountYuan(r.amountYuan),
+        '成本：' + (r.cost === undefined ? '—' : fmtNum(r.cost, 2)),
+        '持仓：' + (r.shares === undefined ? '—' : String(r.shares)),
+        '盈亏(元)：' + (r.pnlYuan === null || r.pnlYuan === undefined ? '—' : fmtNum(r.pnlYuan, 2)),
+        '盈亏%：' + (r.pnlPct === null || r.pnlPct === undefined ? '—' : fmtNum(r.pnlPct, 2)),
+      );
+      if (Array.isArray(r.errors) && r.errors.length) {
+        lines.push('提示：' + r.errors.join('；'));
+      }
+      return lines.join(String.fromCharCode(10));
     }
 
     function sortRows() {
@@ -597,17 +1227,41 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     function buildActionTd(r) {
       const tdAct = document.createElement('td');
       tdAct.className = 'actions';
-      const mk = (label, type, code) => {
+      const mkIcon = (title, type, code, svg) => {
         const b = document.createElement('button');
-        b.textContent = label;
+        b.className = 'secondary';
+        b.title = title;
+        b.setAttribute('aria-label', title);
+        b.innerHTML = svg;
         b.addEventListener('click', (e) => { e.stopPropagation(); vscode.postMessage({ type: type, code: code }); });
         return b;
       };
-      tdAct.appendChild(mk('分时', 'openIntraday', r.code));
-      tdAct.appendChild(mk('持仓', 'editPosition', r.code));
-      tdAct.appendChild(mk('删', 'removeStock', r.code));
-      tdAct.appendChild(mk('复制', 'copyStock', r.code));
-      tdAct.appendChild(mk('移动', 'moveStock', r.code));
+      // 分时：保留“点击整行打开分时”，不在操作栏占按钮位
+      tdAct.appendChild(
+        mkIcon(
+          '编辑持仓',
+          'editPosition',
+          r.code,
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M11.2 2.8l2 2L6 12H4v-2l7.2-7.2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M3.5 13.5h9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
+        ),
+      );
+      tdAct.appendChild(
+        mkIcon(
+          '清仓（清空成本/持仓）',
+          'clearPosition',
+          r.code,
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M4 4l8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12 4L4 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M3.5 13.5h9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.7"/></svg>',
+        ),
+      );
+      // 删除放最后
+      tdAct.appendChild(
+        mkIcon(
+          '删除',
+          'removeStock',
+          r.code,
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M6 3h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M3.5 4.5h9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M6 6.5v6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M10 6.5v6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M5 4.5l.6 9.2c.03.45.4.8.85.8h3.1c.45 0 .82-.35.85-.8L11 4.5" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>',
+        ),
+      );
       return tdAct;
     }
 
@@ -638,6 +1292,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       tds[10].className = 'right ' + pnlCls;
       tds[11].textContent = r.pnlPct === null || r.pnlPct === undefined ? '—' : fmtNum(r.pnlPct, 2);
       tds[11].className = 'right ' + pnlCls;
+      tr.title = rowTooltipText(r);
     }
 
     function createRow(r) {
@@ -667,7 +1322,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       } else {
         empty.style.display = 'none';
         wrap.style.display = 'block';
-        const sorted = sortRows();
+        const sorted = (skipSortOnce && !userSorted) ? rows.slice() : sortRows();
+        skipSortOnce = false;
         const pool = new Map();
         tbody.querySelectorAll('tr[data-code]').forEach((tr) => {
           pool.set(tr.getAttribute('data-code'), tr);
@@ -694,16 +1350,49 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
 
     window.addEventListener('message', (event) => {
       const msg = event.data;
-      if (!msg || msg.type !== 'update') return;
-      rows = msg.rows || [];
-      groups = msg.groups || [];
-      activeGroupId = msg.activeGroupId || '';
-      turnoverDisplay = msg.turnoverDisplay || 'yi';
-      quotesLoading = !!msg.quotesLoading;
-      stealthMode = !!msg.stealthMode;
-      lastUpdatedAt = typeof msg.updatedAt === 'number' ? msg.updatedAt : Date.now();
-      if (typeof msg.sortKey === 'string') sortKey = msg.sortKey;
-      if (typeof msg.sortDir === 'number') sortDir = msg.sortDir;
+      if (!msg) return;
+      if (msg.type === 'nxfxbUpdate') {
+        nxfxb = {
+          upDown: msg.upDown || null,
+          hotTheme: msg.hotTheme || [],
+          hsgtSeries: msg.hsgtSeries || [],
+          updatedAt: typeof msg.updatedAt === 'number' ? msg.updatedAt : Date.now(),
+          error: msg.error || '',
+          bossMode: !!msg.bossMode,
+        };
+        renderNxfxb();
+        return;
+      }
+      if (msg.type === 'update') {
+        rows = msg.rows || [];
+        groups = msg.groups || [];
+        activeGroupId = msg.activeGroupId || '';
+        turnoverDisplay = msg.turnoverDisplay || 'yi';
+        quotesLoading = !!msg.quotesLoading;
+        stealthMode = !!msg.stealthMode;
+        lastUpdatedAt = typeof msg.updatedAt === 'number' ? msg.updatedAt : Date.now();
+        if (typeof msg.sortKey === 'string') sortKey = msg.sortKey;
+        if (typeof msg.sortDir === 'number') sortDir = msg.sortDir;
+        if (typeof msg.reason === 'string' && msg.reason.startsWith('init')) {
+          skipSortOnce = true;
+        }
+      } else if (msg.type === 'patch') {
+        applyPatch(msg.upserts || [], msg.removes || []);
+        groups = msg.groups || groups;
+        activeGroupId = msg.activeGroupId || activeGroupId;
+        turnoverDisplay = msg.turnoverDisplay || turnoverDisplay;
+        quotesLoading = !!msg.quotesLoading;
+        stealthMode = !!msg.stealthMode;
+        lastUpdatedAt = typeof msg.updatedAt === 'number' ? msg.updatedAt : Date.now();
+        if (typeof msg.sortKey === 'string') sortKey = msg.sortKey;
+        if (typeof msg.sortDir === 'number') sortDir = msg.sortDir;
+        if (typeof msg.reason === 'string' && msg.reason.startsWith('init')) {
+          skipSortOnce = true;
+        }
+      } else {
+        return;
+      }
+
       fillGroupSelect();
       document.body.classList.toggle('stealth-mode', stealthMode);
       const err = document.getElementById('err');
@@ -721,6 +1410,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       th.addEventListener('click', () => {
         const k = th.getAttribute('data-k');
         if (!k) return;
+        userSorted = true;
         if (sortKey === k) {
           sortDir *= -1;
         } else {
@@ -729,6 +1419,33 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
         }
         vscode.postMessage({ type: 'setSort', sortKey: sortKey, sortDir: sortDir });
         render();
+      });
+    });
+
+    // 初始化列宽与拖拽调整（含持久化）
+    loadColumnWidths();
+    setupResizableHeaders();
+
+    // NXFXB：展开时懒加载
+    let nxfxbInited = false;
+    const marketDetails = document.getElementById('marketEntryDetails');
+    if (marketDetails) {
+      marketDetails.addEventListener('toggle', () => {
+        if (!marketDetails.open) return;
+        if (nxfxbInited) return;
+        nxfxbInited = true;
+        vscode.postMessage({ type: 'nxfxb.init' });
+      });
+    }
+    const btnNxfxbRefresh = document.getElementById('btnNxfxbRefresh');
+    if (btnNxfxbRefresh) {
+      btnNxfxbRefresh.addEventListener('click', () => vscode.postMessage({ type: 'nxfxb.refresh' }));
+    }
+    document.querySelectorAll('button[data-open-panel]').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        const kind = e.target && e.target.getAttribute ? e.target.getAttribute('data-open-panel') : '';
+        if (!kind) return;
+        vscode.postMessage({ type: 'market.openPanel', kind });
       });
     });
 

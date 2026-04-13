@@ -2,12 +2,17 @@ import * as vscode from 'vscode';
 import { pickStockWithSearch } from './addStockPicker';
 import { openGroupManagePanel } from './groupManagePanel';
 import { openIntradayPanel, openIntradayQuotePage } from './intradayPanel';
+import { openMarketPanel } from './marketPanels/marketPanel';
+import { openRankPanel } from './marketPanels/rankPanel';
 import type { IntradayPageProvider } from './stockUrls';
 import type { NormalizedCode } from './stockCode';
 import { QuoteService } from './services/quoteService';
 import { openTraderxSettingsPanel } from './settingsPanel';
 import { DEFAULT_GROUP_ID, WatchlistStore } from './storage/watchlistStore';
 import { WatchlistViewProvider } from './watchlistView';
+import { fetchNxfxbHotTheme, fetchNxfxbHsgtSeries, fetchNxfxbUpDownData } from './providers/leekNxfxb';
+
+const MARKET_KINDS = ['topConcepts', 'topIndustries', 'limitUp', 'limitDown', 'conceptTopStocks'] as const;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const store = new WatchlistStore(context);
@@ -31,7 +36,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const gid = store.getActiveGroupId();
       await store.addCodeToGroup(gid, picked);
       vscode.window.showInformationMessage(`已添加到分组：${store.getGroupById(gid)?.name ?? gid} / ${picked}`);
-      await watchView.refresh('addStock');
+      // 仅增量更新新增行，避免全列表刷新
+      if (gid === store.getActiveGroupId()) {
+        await watchView.addStockIncremental(picked);
+      } else {
+        await watchView.refresh('addStock');
+      }
     }),
   );
 
@@ -49,7 +59,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       await store.removeCodeFromGroup(gid, picked);
       vscode.window.showInformationMessage(`已从当前分组删除：${picked}`);
-      await watchView.refresh('removeStock');
+      await watchView.removeStockIncremental(picked);
     }),
   );
 
@@ -104,7 +114,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
       await store.setPosition(code!, { cost, shares });
       vscode.window.showInformationMessage(`已保存持仓：${code}`);
-      await watchView.refresh('editPosition');
+      await watchView.editPositionIncremental(code!);
     }),
   );
 
@@ -230,7 +240,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.commands.registerCommand('traderx.openSettings', () => {
-      openTraderxSettingsPanel(refreshWatch);
+      // 保存设置后先轻量同步 UI，避免立即全量拉行情造成等待
+      openTraderxSettingsPanel(() => watchView.refreshUiOnly('settingsSaved'));
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.openMarket', () => {
+      openMarketPanel(context);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.openMarketPanel', (kind?: string) => {
+      const k = typeof kind === 'string' ? kind : '';
+      if (!MARKET_KINDS.includes(k as any)) {
+        vscode.window.showWarningMessage('未知的榜单类型');
+        return;
+      }
+      openRankPanel(context, k as any);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.toggleBossMode', async () => {
+      const cfg = vscode.workspace.getConfiguration('traderx');
+      const cur = cfg.get<boolean>('bossMode') === true;
+      await cfg.update('bossMode', !cur, true);
+      vscode.window.showInformationMessage(`老板模式：${!cur ? '已开启' : '已关闭'}`);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.debugNxfxbSnapshot', async () => {
+      const out = vscode.window.createOutputChannel('TraderX NXFXB');
+      out.show(true);
+      out.appendLine(`[${new Date().toISOString()}] 开始拉取 NXFXB 数据…`);
+      try {
+        const [u, h, s] = await Promise.all([fetchNxfxbUpDownData(), fetchNxfxbHotTheme(), fetchNxfxbHsgtSeries()]);
+        out.appendLine(`UpDownData:\n${JSON.stringify(u, null, 2)}`);
+        out.appendLine(`HotTheme(top10):\n${JSON.stringify(h.slice(0, 10), null, 2)}`);
+        out.appendLine(`HSGT(series,len=${s.length}):\n${s.slice(Math.max(0, s.length - 5)).join('\n')}`);
+        out.appendLine('---');
+      } catch (e) {
+        out.appendLine(`ERROR: ${e instanceof Error ? e.stack || e.message : String(e)}`);
+      }
     }),
   );
 }
