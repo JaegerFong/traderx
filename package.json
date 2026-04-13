@@ -1,0 +1,166 @@
+{
+  "name": "traderx",
+  "displayName": "TraderX A股自选",
+  "description": "A股自选行情、主力净流入与持仓盈亏（本地）",
+  "version": "0.4.1",
+  "publisher": "traderx",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:traderx.watchlistView",
+    "onCommand:traderx.addStock",
+    "onCommand:traderx.removeStock",
+    "onCommand:traderx.editPosition",
+    "onCommand:traderx.refreshQuotes",
+    "onCommand:traderx.createGroup",
+    "onCommand:traderx.renameGroup",
+    "onCommand:traderx.deleteGroup",
+    "onCommand:traderx.openIntraday",
+    "onCommand:traderx.openIntradayPickPlatform",
+    "onCommand:traderx.openGroupManage",
+    "onCommand:traderx.openSettings"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "traderx",
+          "title": "TraderX",
+          "icon": "media/chart.svg"
+        }
+      ]
+    },
+    "views": {
+      "traderx": [
+        {
+          "type": "webview",
+          "id": "traderx.watchlistView",
+          "name": "自选"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "traderx.addStock",
+        "title": "TraderX: 添加自选"
+      },
+      {
+        "command": "traderx.removeStock",
+        "title": "TraderX: 从当前分组删除自选"
+      },
+      {
+        "command": "traderx.editPosition",
+        "title": "TraderX: 编辑成本与持仓"
+      },
+      {
+        "command": "traderx.refreshQuotes",
+        "title": "TraderX: 刷新行情"
+      },
+      {
+        "command": "traderx.createGroup",
+        "title": "TraderX: 新建分组"
+      },
+      {
+        "command": "traderx.renameGroup",
+        "title": "TraderX: 重命名分组"
+      },
+      {
+        "command": "traderx.deleteGroup",
+        "title": "TraderX: 删除分组"
+      },
+      {
+        "command": "traderx.openIntraday",
+        "title": "TraderX: 打开分时行情"
+      },
+      {
+        "command": "traderx.openIntradayPickPlatform",
+        "title": "TraderX: 选择站点打开分时"
+      },
+      {
+        "command": "traderx.openGroupManage",
+        "title": "TraderX: 分组管理"
+      },
+      {
+        "command": "traderx.openSettings",
+        "title": "TraderX: 全局设置"
+      }
+    ],
+    "configuration": {
+      "title": "TraderX",
+      "properties": {
+        "traderx.refreshIntervalSeconds": {
+          "type": "number",
+          "default": 3,
+          "minimum": 3,
+          "maximum": 300,
+          "description": "自动刷新行情间隔（秒）"
+        },
+        "traderx.quoteProviderOrder": {
+          "type": "array",
+          "default": [
+            "sina",
+            "tencent"
+          ],
+          "items": {
+            "type": "string",
+            "enum": [
+              "sina",
+              "tencent"
+            ]
+          },
+          "description": "基础行情数据源优先级（前者优先，失败则尝试下一个）"
+        },
+        "traderx.turnoverDisplay": {
+          "type": "string",
+          "enum": [
+            "wan",
+            "yi"
+          ],
+          "default": "yi",
+          "description": "成交额展示单位：万 / 亿（人民币）"
+        },
+        "traderx.intradayStealthMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "低调办公：侧栏灰度；分时固定东财 h5chart-iframe（与 LeekHub/leek-fund 同源）。开启后忽略分时查看方式与站点"
+        },
+        "traderx.intradayDisplayMode": {
+          "type": "string",
+          "enum": [
+            "simpleBrowser",
+            "systemBrowser"
+          ],
+          "default": "simpleBrowser",
+          "description": "分时查看方式（未开启低调办公时）：内置 Simple Browser 或系统浏览器；历史 webviewCanvas 已废弃并按 simpleBrowser 处理"
+        },
+        "traderx.intradayPageProvider": {
+          "type": "string",
+          "enum": [
+            "eastmoney_full",
+            "eastmoney_discreet"
+          ],
+          "default": "eastmoney_full",
+          "description": "行情页站点：东方财富完整行情（PC 个股页）或东方财富低调模式（basic/h5chart-iframe，与韭菜盒子 LeekFund 一致）。历史 eastmoney/sina/tencent 将映射为完整行情"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.6.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

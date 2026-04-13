@@ -1,0 +1,10 @@
+.vscode/**
+.vscode-test/**
+src/**
+**/*.map
+**/*.ts
+!out/**/*.js
+# 勿忽略 node_modules：否则 vsix 不含 iconv-lite 等 dependencies，从 VSIX 安装后会运行失败
+tsconfig.json
+.gitignore
+**/.eslintrc.json
