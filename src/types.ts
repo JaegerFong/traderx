@@ -15,6 +15,10 @@ export interface QuoteRow {
   low: number | null;
   /** 成交额，单位：元 */
   amountYuan: number | null;
+  /** 竞买价（集合竞价参考），无则 null */
+  bidPrice: number | null;
+  /** 竞卖价（集合竞价参考），无则 null */
+  askPrice: number | null;
   prevClose: number | null;
   cost?: number;
   shares?: number;
@@ -43,6 +47,8 @@ export interface RawQuote {
   high: number | null;
   low: number | null;
   amountYuan: number | null;
+  bidPrice: number | null;
+  askPrice: number | null;
   prevClose: number | null;
 }
 

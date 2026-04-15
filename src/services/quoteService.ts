@@ -3,10 +3,19 @@ import type { NormalizedCode } from '../stockCode';
 import { fetchEastmoneyMainForceOne, mapLimit } from '../providers/eastmoney';
 import { fetchSinaQuotes } from '../providers/sina';
 import { fetchTencentQuotes } from '../providers/tencent';
+import { isCnAshareCallAuctionWindow } from '../marketHours';
 import type { QuoteRow, RawQuote } from '../types';
 
 function isQuoteUsable(q: RawQuote | undefined): boolean {
-  return !!q && q.price !== null;
+  if (!q) {
+    return false;
+  }
+  if (q.price !== null && q.price > 0) {
+    return true;
+  }
+  const bid = q.bidPrice;
+  const ask = q.askPrice;
+  return (bid !== null && bid > 0) || (ask !== null && ask > 0);
 }
 
 /**
@@ -32,10 +41,40 @@ function sanitizeChangePct(raw: RawQuote): RawQuote {
   return raw;
 }
 
+/** 9:15–9:30 集合竞价：新浪等源现价可能为 0，用竞买/竞卖价推导展示价 */
+function applyCallAuctionPrice(raw: RawQuote, now: Date): RawQuote {
+  if (!isCnAshareCallAuctionWindow(now)) {
+    return raw;
+  }
+  const p = raw.price;
+  if (p !== null && p > 0) {
+    return raw;
+  }
+  const bid = raw.bidPrice;
+  const ask = raw.askPrice;
+  let np: number | null = null;
+  if (bid !== null && bid > 0 && ask !== null && ask > 0) {
+    np = (bid + ask) / 2;
+  } else if (bid !== null && bid > 0) {
+    np = bid;
+  } else if (ask !== null && ask > 0) {
+    np = ask;
+  }
+  if (np === null) {
+    return raw;
+  }
+  let changePct: number | null = null;
+  if (raw.prevClose !== null && raw.prevClose !== 0) {
+    changePct = ((np - raw.prevClose) / raw.prevClose) * 100;
+  }
+  return { ...raw, price: np, changePct };
+}
+
 function mergeFromProviders(
   codes: NormalizedCode[],
   order: Array<'sina' | 'tencent'>,
   maps: { sina: Map<string, RawQuote>; tencent: Map<string, RawQuote> },
+  now: Date,
 ): Map<string, RawQuote> {
   const out = new Map<string, RawQuote>();
   for (const code of codes) {
@@ -59,7 +98,9 @@ function mergeFromProviders(
       }
     }
     if (picked) {
-      out.set(code, sanitizeChangePct(picked));
+      let r = applyCallAuctionPrice(picked, now);
+      r = sanitizeChangePct(r);
+      out.set(code, r);
     } else {
       out.set(code, {
         code,
@@ -69,6 +110,8 @@ function mergeFromProviders(
         high: null,
         low: null,
         amountYuan: null,
+        bidPrice: null,
+        askPrice: null,
         prevClose: null,
       });
     }
@@ -91,7 +134,7 @@ async function fetchMergedBaseQuotes(codes: NormalizedCode[]): Promise<Map<strin
   const [sinaRes, tencentRes] = await Promise.allSettled([fetchSinaQuotes(codes), fetchTencentQuotes(codes)]);
   const sinaMap = sinaRes.status === 'fulfilled' ? sinaRes.value : new Map<string, RawQuote>();
   const tencentMap = tencentRes.status === 'fulfilled' ? tencentRes.value : new Map<string, RawQuote>();
-  return mergeFromProviders(codes, getQuoteProviderOrder(), { sina: sinaMap, tencent: tencentMap });
+  return mergeFromProviders(codes, getQuoteProviderOrder(), { sina: sinaMap, tencent: tencentMap }, new Date());
 }
 
 function buildQuoteRows(
@@ -135,6 +178,8 @@ function buildQuoteRows(
       high: raw.high,
       low: raw.low,
       amountYuan: raw.amountYuan,
+      bidPrice: raw.bidPrice,
+      askPrice: raw.askPrice,
       prevClose: raw.prevClose,
       cost,
       shares,

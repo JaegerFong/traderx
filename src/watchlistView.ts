@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { isCnAshareAutoRefreshWindow } from './marketHours';
 import { QuoteService } from './services/quoteService';
 import { WatchlistStore } from './storage/watchlistStore';
 import type { NormalizedCode } from './stockCode';
@@ -151,6 +152,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
         high: null,
         low: null,
         amountYuan: null,
+        bidPrice: null,
+        askPrice: null,
         prevClose: null,
         cost: pos?.cost,
         shares: pos?.shares,
@@ -161,6 +164,9 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async postRows(reason: string): Promise<void> {
+    if (reason === 'timer' && !isCnAshareAutoRefreshWindow()) {
+      return;
+    }
     const my = ++this.seq;
     const codes = this.store.getCodesForActiveGroup();
     const positions = this.store.getPositions();
@@ -971,6 +977,22 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       return '';
     }
 
+    function isShanghaiCallAuctionNow() {
+      const d = new Date();
+      const wd = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', weekday: 'short' }).format(d);
+      if (wd === 'Sat' || wd === 'Sun') return false;
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Shanghai',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(d);
+      const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
+      const m = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+      const t = h * 60 + m;
+      return t >= 9 * 60 + 15 && t < 9 * 60 + 30;
+    }
+
     /** 鼠标悬浮行时展示与表格一致的全部字段（多行） */
     function rowTooltipText(r) {
       const lines = [
@@ -982,11 +1004,25 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       if (r.prevClose !== null && r.prevClose !== undefined && !Number.isNaN(r.prevClose)) {
         lines.push('昨收：' + fmtNum(r.prevClose, 2));
       }
+      if (isShanghaiCallAuctionNow()) {
+        if (r.bidPrice !== null && r.bidPrice !== undefined && !Number.isNaN(r.bidPrice)) {
+          lines.push('竞买价：' + fmtNum(r.bidPrice, 2));
+        }
+        if (r.askPrice !== null && r.askPrice !== undefined && !Number.isNaN(r.askPrice)) {
+          lines.push('竞卖价：' + fmtNum(r.askPrice, 2));
+        }
+      }
       lines.push(
         '主力净流入(万)：' + fmtNum(r.mainNetInflowWan, 2),
         '最高：' + fmtNum(r.high, 2),
         '最低：' + fmtNum(r.low, 2),
-        '成交额：' + fmtAmountYuan(r.amountYuan),
+      );
+      if (isShanghaiCallAuctionNow()) {
+        lines.push('竞价成交额：' + fmtAmountYuan(r.amountYuan));
+      } else {
+        lines.push('成交额：' + fmtAmountYuan(r.amountYuan));
+      }
+      lines.push(
         '成本：' + (r.cost === undefined ? '—' : fmtNum(r.cost, 2)),
         '持仓：' + (r.shares === undefined ? '—' : String(r.shares)),
         '盈亏(元)：' + (r.pnlYuan === null || r.pnlYuan === undefined ? '—' : fmtNum(r.pnlYuan, 2)),

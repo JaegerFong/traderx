@@ -14,7 +14,7 @@ function mapNormalizedFromSinaKey(key: string): NormalizedCode | null {
 
 /**
  * 解析新浪财经 hq.sinajs.cn 返回（GBK）。
- * 常见字段顺序：0名称 1开盘 2昨收 3现价 4最高 5最低 ... 8成交量(手) 9成交额(元)
+ * 常见字段顺序：0名称 1开盘 2昨收 3现价 4最高 5最低 6竞买价 7竞卖价 8成交量(手) 9成交额(元)
  */
 export function parseSinaBody(key: string, body: string): RawQuote | null {
   const code = mapNormalizedFromSinaKey(key.toLowerCase());
@@ -30,6 +30,8 @@ export function parseSinaBody(key: string, body: string): RawQuote | null {
       high: null,
       low: null,
       amountYuan: null,
+      bidPrice: null,
+      askPrice: null,
       prevClose: null,
     };
   }
@@ -41,6 +43,8 @@ export function parseSinaBody(key: string, body: string): RawQuote | null {
   const price = num(parts[3]);
   const high = num(parts[4]);
   const low = num(parts[5]);
+  const bidPrice = num(parts[6]);
+  const askPrice = num(parts[7]);
   const volHands = num(parts[8]);
   const amountYuan = num(parts[9]);
 
@@ -57,6 +61,8 @@ export function parseSinaBody(key: string, body: string): RawQuote | null {
     high,
     low,
     amountYuan,
+    bidPrice,
+    askPrice,
     prevClose,
   };
 }

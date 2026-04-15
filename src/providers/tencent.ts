@@ -13,7 +13,7 @@ function mapKeyToNormalized(key: string): NormalizedCode | null {
 
 /**
  * 腾讯 qt.gtimg.cn：v_sh600519="~" 分隔。
- * 参考字段：3现价 4昨收 5开盘 31涨跌额 32涨跌幅 33最高 34最低；35 常含 现价/量/额
+ * 参考字段：3现价 4昨收 5开盘；9 买一价 19 卖一价；31涨跌额 32涨跌幅 33最高 34最低；35 常含 现价/量/额
  */
 export function parseTencentLine(key: string, body: string): RawQuote | null {
   const code = mapKeyToNormalized(key);
@@ -29,6 +29,8 @@ export function parseTencentLine(key: string, body: string): RawQuote | null {
       high: null,
       low: null,
       amountYuan: null,
+      bidPrice: null,
+      askPrice: null,
       prevClose: null,
     };
   }
@@ -40,6 +42,8 @@ export function parseTencentLine(key: string, body: string): RawQuote | null {
   const changePct = num(p[32]);
   const high = num(p[33]);
   const low = num(p[34]);
+  const bidPrice = num(p[9]);
+  const askPrice = num(p[19]);
 
   let amountYuan: number | null = null;
   const combo = p[35];
@@ -62,6 +66,8 @@ export function parseTencentLine(key: string, body: string): RawQuote | null {
     high,
     low,
     amountYuan,
+    bidPrice,
+    askPrice,
     prevClose,
   };
 }
