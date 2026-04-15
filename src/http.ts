@@ -12,47 +12,6 @@ const httpsAgent = new https.Agent({
   timeout: 60000,
 });
 
-let cachedProxyUrl: string | null | undefined;
-let cachedProxyAgent: https.Agent | undefined;
-let cachedProxyAgentProxyUrl: string | null | undefined;
-let cachedProxyAgentPromise: Promise<https.Agent> | undefined;
-
-function getProxyUrl(): string | null {
-  if (cachedProxyUrl !== undefined) {
-    return cachedProxyUrl;
-  }
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const vscode = require('vscode') as typeof import('vscode');
-    const p = vscode.workspace.getConfiguration('traderx').get<string>('networkProxy') ?? '';
-    cachedProxyUrl = p.trim() ? p.trim() : null;
-    return cachedProxyUrl;
-  } catch {
-    cachedProxyUrl = null;
-    return null;
-  }
-}
-
-async function getProxyAgent(): Promise<https.Agent | undefined> {
-  const p = getProxyUrl();
-  if (!p) {
-    cachedProxyAgent = undefined;
-    return undefined;
-  }
-  if (cachedProxyAgent && cachedProxyAgentProxyUrl === p) {
-    return cachedProxyAgent;
-  }
-  if (!cachedProxyAgentPromise || cachedProxyAgentProxyUrl !== p) {
-    cachedProxyAgentProxyUrl = p;
-    cachedProxyAgentPromise = (async () => {
-      const mod = await import('https-proxy-agent');
-      return new mod.HttpsProxyAgent(p) as unknown as https.Agent;
-    })();
-  }
-  cachedProxyAgent = await cachedProxyAgentPromise;
-  return cachedProxyAgent;
-}
-
 function mergeHeaders(rest: RequestInit | undefined): Record<string, string> {
   return {
     'User-Agent': DEFAULT_UA,
@@ -88,13 +47,12 @@ function isTransientNetError(e: unknown): boolean {
 /** Node https，带有限次重试（缓解 socket hang up） */
 async function fetchTextNodeHttps(urlStr: string, headers: Record<string, string>, timeoutMs: number): Promise<string> {
   let lastErr: unknown;
-  const proxyAgent = await getProxyAgent();
   const attempts = [false, true];
   for (let i = 0; i < attempts.length; i++) {
     const noKeepAlive = attempts[i]!;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        return await fetchTextNodeHttpsOnce(urlStr, headers, timeoutMs, noKeepAlive, proxyAgent);
+        return await fetchTextNodeHttpsOnce(urlStr, headers, timeoutMs, noKeepAlive);
       } catch (e) {
         lastErr = e;
         if (!isTransientNetError(e) || attempt === 2) {
@@ -112,7 +70,6 @@ function fetchTextNodeHttpsOnce(
   headers: Record<string, string>,
   timeoutMs: number,
   disableAgent: boolean,
-  proxyAgent?: https.Agent,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
@@ -125,7 +82,7 @@ function fetchTextNodeHttpsOnce(
         headers,
         timeout: timeoutMs,
         rejectUnauthorized: true,
-        agent: proxyAgent ?? (disableAgent ? undefined : httpsAgent),
+        agent: disableAgent ? undefined : httpsAgent,
       },
       (res) => {
         if (res.statusCode && res.statusCode >= 400) {
@@ -154,10 +111,6 @@ function shouldRetryWithNode(e: unknown): boolean {
 export async function fetchText(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<string> {
   const { timeoutMs = 20000, ...rest } = init ?? {};
   const headers = mergeHeaders(rest);
-  // 若配置了代理：优先走 Node https + proxy agent（undici fetch 默认不读取 VSCode 配置）
-  if (url.startsWith('https://') && getProxyUrl()) {
-    return fetchTextNodeHttps(url, headers, timeoutMs);
-  }
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -184,10 +137,6 @@ export async function fetchText(url: string, init?: RequestInit & { timeoutMs?: 
 export async function fetchBuffer(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<Buffer> {
   const { timeoutMs = 20000, ...rest } = init ?? {};
   const headers = mergeHeaders(rest);
-  if (url.startsWith('https://') && getProxyUrl()) {
-    const text = await fetchTextNodeHttps(url, headers, timeoutMs);
-    return Buffer.from(text, 'utf8');
-  }
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {

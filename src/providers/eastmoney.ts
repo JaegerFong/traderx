@@ -1,6 +1,6 @@
 import type { NormalizedCode } from '../stockCode';
 import { toEastmoneySecid } from '../stockCode';
-import { fetchText } from '../http';
+import { fetchTextPush2 } from './market';
 
 export interface EastmoneyExtra {
   mainNetInflowWan: number | null;
@@ -19,25 +19,39 @@ function num(v: unknown): number | null {
 
 /**
  * 从 stock/get 的 data 中解析主力净流入（万元）。
- * f169 常为万元；部分环境 f62 为元，需 /10000；f184 可作备用。
+ * - f169：多为万元（旧）
+ * - f137：多为当日主力净流入（元），见东财 PC 页常用字段
+ * - f62：部分场景为元，需 /10000
+ * - f184、f279、f303：作备用（元→万）
  */
 function pickMainNetInflowWan(data: Record<string, unknown>): number | null {
   const f169 = num(data.f169);
+  const f137 = num(data.f137);
   const f62 = num(data.f62);
   const f184 = num(data.f184);
+  const f279 = num(data.f279);
+  const f303 = num(data.f303);
 
   if (f169 !== null) {
-    // f169 一般为万元；若异常为 0 而 f62 有显著值，则改用 f62（元→万）
     if (Math.abs(f169) < 1e-9 && f62 !== null && Math.abs(f62) > 1e-3) {
       return f62 / 10_000;
     }
     return f169;
+  }
+  if (f137 !== null) {
+    return f137 / 10_000;
   }
   if (f62 !== null) {
     return f62 / 10_000;
   }
   if (f184 !== null) {
     return f184 / 10_000;
+  }
+  if (f279 !== null) {
+    return f279 / 10_000;
+  }
+  if (f303 !== null) {
+    return f303 / 10_000;
   }
   return null;
 }
@@ -48,7 +62,7 @@ export async function fetchEastmoneyMainForceOne(code: NormalizedCode): Promise<
     return { mainNetInflowWan: null };
   }
 
-  const fields = ['f57', 'f58', 'f62', 'f169', 'f170', 'f184'].join(',');
+  const fields = ['f57', 'f58', 'f62', 'f137', 'f169', 'f170', 'f184', 'f279', 'f303'].join(',');
   const qs = new URLSearchParams({
     secid,
     ut: UT,
@@ -56,15 +70,10 @@ export async function fetchEastmoneyMainForceOne(code: NormalizedCode): Promise<
     fltt: '2',
     fields,
   });
-  const url = `https://push2.eastmoney.com/api/qt/stock/get?${qs.toString()}`;
+  const pathAndQuery = `/api/qt/stock/get?${qs.toString()}`;
 
   try {
-    const text = await fetchText(url, {
-      headers: {
-        Referer: 'https://quote.eastmoney.com/',
-        Accept: 'application/json,text/plain,*/*',
-      },
-    });
+    const text = await fetchTextPush2(pathAndQuery, 22_000);
     const json = JSON.parse(text) as {
       rc?: number;
       data?: Record<string, unknown> | null;

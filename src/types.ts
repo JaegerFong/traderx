@@ -25,7 +25,15 @@ export interface QuoteRow {
   errors?: string[];
 }
 
-export type SortKey = 'price' | 'changePct' | 'mainNetInflowWan' | 'code' | 'name';
+export type SortKey =
+  | 'name'
+  | 'price'
+  | 'changePct'
+  | 'mainNetInflowWan'
+  | 'cost'
+  | 'shares'
+  | 'pnlYuan'
+  | 'pnlPct';
 
 export interface RawQuote {
   code: string;

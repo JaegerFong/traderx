@@ -9,6 +9,29 @@ function isQuoteUsable(q: RawQuote | undefined): boolean {
   return !!q && q.price !== null;
 }
 
+/**
+ * 部分数据源在集合竞价/未开盘时涨跌幅字段与现价、昨收不一致（例如误为 100%），
+ * 在横盘或推导值明显更合理时用 (现价-昨收)/昨收 覆盖。
+ */
+function sanitizeChangePct(raw: RawQuote): RawQuote {
+  const { price, prevClose, changePct } = raw;
+  if (price === null || prevClose === null || prevClose === 0) {
+    return raw;
+  }
+  const computed = ((price - prevClose) / prevClose) * 100;
+  if (changePct === null || Number.isNaN(changePct)) {
+    return { ...raw, changePct: computed };
+  }
+  const diff = Math.abs(changePct - computed);
+  if (diff > 0.5 && Math.abs(computed) < 0.05) {
+    return { ...raw, changePct: computed };
+  }
+  if (diff > 10 && Math.abs(computed) < 1) {
+    return { ...raw, changePct: computed };
+  }
+  return raw;
+}
+
 function mergeFromProviders(
   codes: NormalizedCode[],
   order: Array<'sina' | 'tencent'>,
@@ -36,7 +59,7 @@ function mergeFromProviders(
       }
     }
     if (picked) {
-      out.set(code, picked);
+      out.set(code, sanitizeChangePct(picked));
     } else {
       out.set(code, {
         code,

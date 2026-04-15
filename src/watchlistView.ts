@@ -4,7 +4,7 @@ import { WatchlistStore } from './storage/watchlistStore';
 import type { NormalizedCode } from './stockCode';
 import type { QuoteRow } from './types';
 import { fetchEastmoneyMainForceOne, mapLimit } from './providers/eastmoney';
-import { fetchNxfxbHotTheme, fetchNxfxbHsgtSeries, fetchNxfxbUpDownData } from './providers/leekNxfxb';
+import { STEALTH_OFFICE_STYLE_SNIPPET } from './stealthOfficeWebview';
 
 export class WatchlistViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewId = 'traderx.watchlistView';
@@ -14,8 +14,6 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
   private seq = 0;
   private registeredConfigListener = false;
   private rowCache = new Map<string, QuoteRow>();
-  private nxfxbInited = false;
-  private nxfxbQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
@@ -427,26 +425,6 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       await vscode.commands.executeCommand('traderx.openSettings');
       return;
     }
-    if (type === 'openMarket') {
-      await vscode.commands.executeCommand('traderx.openMarket');
-      return;
-    }
-    if (type === 'nxfxb.init') {
-      if (this.nxfxbInited) {
-        return;
-      }
-      this.nxfxbInited = true;
-      void this.loadNxfxb('init');
-      return;
-    }
-    if (type === 'nxfxb.refresh') {
-      void this.loadNxfxb('refresh');
-      return;
-    }
-    if (type === 'market.openPanel' && typeof msg.kind === 'string') {
-      await vscode.commands.executeCommand('traderx.openMarketPanel', msg.kind);
-      return;
-    }
     if (type === 'clearPosition' && typeof msg.code === 'string') {
       const code = msg.code as NormalizedCode;
       const cur = this.store.getPositions()[code];
@@ -526,46 +504,6 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private postNxfxb(payload: { upDown: unknown; hotTheme: unknown; hsgtSeries: unknown; updatedAt: number; error?: string }): void {
-    const bossMode = vscode.workspace.getConfiguration('traderx').get<boolean>('bossMode') === true;
-    this.view?.webview.postMessage({ type: 'nxfxbUpdate', bossMode, ...payload });
-  }
-
-  private async loadNxfxb(reason: string): Promise<void> {
-    this.nxfxbQueue = this.nxfxbQueue.then(async () => {
-      this.postNxfxb({ upDown: null, hotTheme: [], hsgtSeries: [], updatedAt: Date.now(), error: '' });
-      try {
-        const [upDownRes, hotThemeRes, hsgtRes] = await Promise.allSettled([
-          fetchNxfxbUpDownData(),
-          fetchNxfxbHotTheme(),
-          fetchNxfxbHsgtSeries(),
-        ]);
-
-        const upDown = upDownRes.status === 'fulfilled' ? upDownRes.value : null;
-        const hotTheme = hotThemeRes.status === 'fulfilled' ? hotThemeRes.value : [];
-        const hsgtSeries = hsgtRes.status === 'fulfilled' ? hsgtRes.value : [];
-
-        let err = '';
-        for (const r of [upDownRes, hotThemeRes, hsgtRes]) {
-          if (r.status === 'rejected') {
-            const m = r.reason instanceof Error ? r.reason.message : String(r.reason);
-            err = err ? `${err}; ${m}` : m;
-          }
-        }
-        this.postNxfxb({ upDown, hotTheme, hsgtSeries, updatedAt: Date.now(), error: err ? `[${reason}] ${err}` : '' });
-      } catch (e) {
-        this.postNxfxb({
-          upDown: null,
-          hotTheme: [],
-          hsgtSeries: [],
-          updatedAt: Date.now(),
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
-    });
-    await this.nxfxbQueue;
-  }
-
   private buildHtml(webview: vscode.Webview, nonce: string): string {
     const csp = [
       `default-src 'none';`,
@@ -587,11 +525,14 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       --muted: var(--vscode-descriptionForeground);
       --bg-header: var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04));
       /** 冻结前 4 列宽度（与 left 累加一致） */
-      --freeze-w1: 72px;
-      /** 名称列：默认更紧凑（约 4 个中文字符） */
-      --freeze-w2: 72px;
-      --freeze-w3: 64px;
-      --freeze-w4: 72px;
+      /** 名称：约 4 个中文字符 + 省略号 */
+      --freeze-w1: 64px;
+      /** 现价 */
+      --freeze-w2: 48px;
+      /** 涨幅 */
+      --freeze-w3: 48px;
+      /** 操作：3 个 icon 按钮 */
+      --freeze-w4: 104px;
       --freeze-l2: var(--freeze-w1);
       --freeze-l3: calc(var(--freeze-w1) + var(--freeze-w2));
       --freeze-l4: calc(var(--freeze-w1) + var(--freeze-w2) + var(--freeze-w3));
@@ -668,37 +609,9 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       margin: 6px 0;
       white-space: pre-wrap;
     }
-    .boss-wrap {
-      position: relative;
-    }
-    .boss-wrap.boss-mode {
-      filter: grayscale(1) contrast(.9) brightness(.92);
-    }
-    .boss-wrap.boss-mode .boss-overlay {
-      display: block;
-    }
-    .boss-overlay {
-      display: none;
-      position: absolute;
-      inset: 0;
-      background: color-mix(in srgb, var(--vscode-editor-background) 55%, transparent);
-      border-radius: 4px;
-      pointer-events: all;
-      cursor: not-allowed;
-    }
-    .boss-overlay .boss-text {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      font-size: 11px;
-      color: var(--muted);
-      background: color-mix(in srgb, var(--vscode-editor-background) 85%, transparent);
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 4px 8px;
-    }
     .table-wrap {
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: auto;
       border: 1px solid var(--border);
       border-radius: 4px;
     }
@@ -706,7 +619,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       width: 100%;
       border-collapse: separate;
       border-spacing: 0;
-      min-width: 980px;
+      table-layout: fixed;
     }
     thead th {
       position: sticky;
@@ -789,9 +702,22 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     }
     tbody td {
       border-bottom: 1px solid var(--border);
-      padding: 6px 8px;
+      padding: 4px 6px;
       white-space: nowrap;
     }
+    /* 名称最多展示约 4 个字符 */
+    tbody td:nth-child(1) {
+      max-width: var(--freeze-w1);
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* 操作列不省略，按钮完整显示 */
+    tbody td.actions {
+      overflow: visible;
+      text-overflow: clip;
+      white-space: nowrap;
+    }
+    thead th { padding: 5px 6px; }
     /** 表头拖拽调整列宽 */
     thead th {
       position: sticky;
@@ -815,10 +741,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     .right { text-align: right; }
     .cn-up { color: var(--vscode-charts-red, #f14c4c); }
     .cn-down { color: var(--vscode-charts-green, #3fb950); }
-    /** 低调办公：整表灰度，隐藏涨跌红绿 */
-    body.stealth-mode #wrap {
-      filter: grayscale(1);
-    }
+    ${STEALTH_OFFICE_STYLE_SNIPPET}
     .actions button {
       margin-right: 6px;
       padding: 2px 6px;
@@ -853,34 +776,9 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
   </style>
 </head>
 <body>
-  <details class="reserve" id="marketEntryDetails">
-    <summary>市场行情</summary>
-    <div class="boss-wrap" id="marketBossWrap">
-      <div class="boss-overlay"><div class="boss-text">老板模式：已置灰</div></div>
-      <div class="meta" id="nxfxbMeta" style="margin-top:6px;">加载中…</div>
-      <div class="error" id="nxfxbErr" style="display:none"></div>
-      <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-        <div style="border:1px solid var(--border);border-radius:4px;padding:8px;">
-          <div class="meta">涨跌家数</div>
-          <div id="nxfxbUpDown" style="margin-top:6px;line-height:1.8">—</div>
-        </div>
-        <div style="border:1px solid var(--border);border-radius:4px;padding:8px;">
-          <div class="meta">热门主题</div>
-          <div id="nxfxbHotTheme" style="margin-top:6px;line-height:1.8">—</div>
-        </div>
-      </div>
-      <div class="more-actions" style="margin-top:10px;">
-        <button type="button" class="secondary" data-open-panel="topConcepts">概念Top10</button>
-        <button type="button" class="secondary" data-open-panel="topIndustries">板块Top10</button>
-        <button type="button" class="secondary" data-open-panel="limitUp">涨停</button>
-        <button type="button" class="secondary" data-open-panel="limitDown">跌停</button>
-        <button type="button" class="secondary" data-open-panel="conceptTopStocks">指定概念Top10</button>
-        <button type="button" id="btnNxfxbRefresh">刷新</button>
-      </div>
-    </div>
-  </details>
-
-  <details class="reserve" id="watchlistDetails" open>
+  <div class="traderx-stealth-scrim" aria-hidden="true"></div>
+  <div class="traderx-stealth-inner">
+  <details class="reserve" id="watchlistDetails">
     <summary>自选栏</summary>
     <div class="watchlist-body">
       <div class="bar-row">
@@ -901,34 +799,16 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       <div class="table-wrap" id="wrap" style="display:none">
         <table>
           <colgroup id="cols">
-            <col style="width:72px" />
-            <col style="width:72px" />
             <col style="width:64px" />
-            <col style="width:72px" />
-            <col style="width:128px" />
-            <col style="width:64px" />
-            <col style="width:64px" />
-            <col style="width:96px" />
-            <col style="width:64px" />
-            <col style="width:64px" />
-            <col style="width:84px" />
-            <col style="width:72px" />
-            <col style="width:168px" />
+            <col style="width:48px" />
+            <col style="width:48px" />
+            <col style="width:104px" />
           </colgroup>
           <thead>
             <tr>
-              <th data-k="code">代码<span class="sort-ind" aria-hidden="true"></span></th>
               <th data-k="name">名称<span class="sort-ind" aria-hidden="true"></span></th>
               <th class="right" data-k="price">现价<span class="sort-ind" aria-hidden="true"></span></th>
               <th class="right" data-k="changePct">涨跌幅<span class="sort-ind" aria-hidden="true"></span></th>
-              <th class="right" data-k="mainNetInflowWan">主力净流入(万)<span class="sort-ind" aria-hidden="true"></span></th>
-              <th class="right" data-k="high">最高<span class="sort-ind" aria-hidden="true"></span></th>
-              <th class="right" data-k="low">最低<span class="sort-ind" aria-hidden="true"></span></th>
-              <th class="right" data-k="amountYuan">成交额<span class="sort-ind" aria-hidden="true"></span></th>
-              <th class="right" data-k="cost">成本<span class="sort-ind" aria-hidden="true"></span></th>
-              <th class="right" data-k="shares">持仓<span class="sort-ind" aria-hidden="true"></span></th>
-              <th class="right" data-k="pnlYuan">盈亏(元)<span class="sort-ind" aria-hidden="true"></span></th>
-              <th class="right" data-k="pnlPct">盈亏%<span class="sort-ind" aria-hidden="true"></span></th>
               <th>操作</th>
             </tr>
           </thead>
@@ -948,6 +828,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       后续可扩展：大盘指数、预警、策略信号等。持仓盈亏在侧栏表格中维护。
     </p>
   </details>
+  </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
@@ -961,62 +842,10 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     let quotesLoading = false;
     let stealthMode = false;
     let turnoverDisplay = 'yi';
-    let sortKey = 'code';
+    let sortKey = 'name';
     let sortDir = 1;
     let userSorted = false;
     let skipSortOnce = true;
-
-    // ---------------- NXFXB（LeekFund 同口径） ----------------
-    let nxfxb = { upDown: null, hotTheme: [], hsgtSeries: [], updatedAt: Date.now(), error: '', bossMode: false };
-
-    function fmt2(n) {
-      if (n === null || n === undefined || Number.isNaN(n)) return '—';
-      return Number(n).toFixed(2);
-    }
-
-    function renderNxfxb() {
-      const meta = document.getElementById('nxfxbMeta');
-      const err = document.getElementById('nxfxbErr');
-      const ud = document.getElementById('nxfxbUpDown');
-      const ht = document.getElementById('nxfxbHotTheme');
-      const bw = document.getElementById('marketBossWrap');
-      if (!meta || !err || !ud || !ht) return;
-      if (bw) bw.classList.toggle('boss-mode', !!nxfxb.bossMode);
-
-      if (nxfxb.error) {
-        err.style.display = 'block';
-        err.textContent = nxfxb.error;
-      } else {
-        err.style.display = 'none';
-        err.textContent = '';
-      }
-      meta.textContent = '更新：' + new Date(nxfxb.updatedAt || Date.now()).toLocaleTimeString();
-
-      const u = nxfxb.upDown;
-      if (u && typeof u === 'object') {
-        const up = u.up ?? '—';
-        const down = u.down ?? '—';
-        const r0 = u.r0 ?? null;
-        ud.innerHTML =
-          '上涨：' + up + ' / 下跌：' + down +
-          '<br/>平均涨幅：' + (r0 === null ? '—' : fmt2((Number(r0) || 0) * 100)) + '%';
-      } else {
-        ud.textContent = '—';
-      }
-
-      const list = Array.isArray(nxfxb.hotTheme) ? nxfxb.hotTheme : [];
-      if (list.length) {
-        ht.innerHTML = list.slice(0, 6).map((x) => {
-          const name = x.SecurityName || x.CategoryName || '—';
-          const pct = x.SZDF ?? x.CZDF ?? null;
-          const cls = pct === null ? '' : (pct > 0 ? 'cn-up' : (pct < 0 ? 'cn-down' : ''));
-          const pctTxt = pct === null ? '—' : fmt2(pct) + '%';
-          return '<div style="display:flex;justify-content:space-between;gap:8px;"><span>' + String(name) + '</span><span class="' + cls + '">' + pctTxt + '</span></div>';
-        }).join('');
-      } else {
-        ht.textContent = '—';
-      }
-    }
 
     function getColEls() {
       const cg = document.getElementById('cols');
@@ -1175,14 +1004,10 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       const arr = rows.slice();
       const val = (r) => {
         const map = {
-          code: r.code,
           name: r.name,
           price: r.price,
           changePct: r.changePct,
           mainNetInflowWan: r.mainNetInflowWan,
-          high: r.high,
-          low: r.low,
-          amountYuan: r.amountYuan,
           cost: r.cost,
           shares: r.shares,
           pnlYuan: r.pnlYuan,
@@ -1267,31 +1092,13 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
 
     function fillDataCells(tr, r) {
       const pctCls = clsForChange(r.changePct);
-      const pnlCls = clsForChange(r.pnlPct ?? null);
       const tds = tr.querySelectorAll('td');
-      if (tds.length < 12) return;
-      tds[0].textContent = r.code;
-      tds[1].textContent = r.name ?? '—';
-      tds[2].textContent = fmtNum(r.price, 2);
-      tds[2].className = 'right';
-      tds[3].textContent = fmtNum(r.changePct, 2);
-      tds[3].className = 'right ' + pctCls;
-      tds[4].textContent = fmtNum(r.mainNetInflowWan, 2);
-      tds[4].className = 'right';
-      tds[5].textContent = fmtNum(r.high, 2);
-      tds[5].className = 'right';
-      tds[6].textContent = fmtNum(r.low, 2);
-      tds[6].className = 'right';
-      tds[7].textContent = fmtAmountYuan(r.amountYuan);
-      tds[7].className = 'right';
-      tds[8].textContent = r.cost === undefined ? '—' : fmtNum(r.cost, 2);
-      tds[8].className = 'right';
-      tds[9].textContent = r.shares === undefined ? '—' : String(r.shares);
-      tds[9].className = 'right';
-      tds[10].textContent = r.pnlYuan === null || r.pnlYuan === undefined ? '—' : fmtNum(r.pnlYuan, 2);
-      tds[10].className = 'right ' + pnlCls;
-      tds[11].textContent = r.pnlPct === null || r.pnlPct === undefined ? '—' : fmtNum(r.pnlPct, 2);
-      tds[11].className = 'right ' + pnlCls;
+      if (tds.length < 4) return;
+      tds[0].textContent = r.name ?? '—';
+      tds[1].textContent = fmtNum(r.price, 2);
+      tds[1].className = 'right';
+      tds[2].textContent = fmtNum(r.changePct, 2);
+      tds[2].className = 'right ' + pctCls;
       tr.title = rowTooltipText(r);
     }
 
@@ -1299,7 +1106,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       const tr = document.createElement('tr');
       tr.className = 'data-row';
       tr.setAttribute('data-code', r.code);
-      for (let i = 0; i < 12; i++) {
+      for (let i = 0; i < 3; i++) {
         tr.appendChild(document.createElement('td'));
       }
       fillDataCells(tr, r);
@@ -1351,18 +1158,6 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     window.addEventListener('message', (event) => {
       const msg = event.data;
       if (!msg) return;
-      if (msg.type === 'nxfxbUpdate') {
-        nxfxb = {
-          upDown: msg.upDown || null,
-          hotTheme: msg.hotTheme || [],
-          hsgtSeries: msg.hsgtSeries || [],
-          updatedAt: typeof msg.updatedAt === 'number' ? msg.updatedAt : Date.now(),
-          error: msg.error || '',
-          bossMode: !!msg.bossMode,
-        };
-        renderNxfxb();
-        return;
-      }
       if (msg.type === 'update') {
         rows = msg.rows || [];
         groups = msg.groups || [];
@@ -1394,7 +1189,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       }
 
       fillGroupSelect();
-      document.body.classList.toggle('stealth-mode', stealthMode);
+      document.body.classList.toggle('traderx-stealth-office', stealthMode);
       const err = document.getElementById('err');
       if (msg.error) {
         err.style.display = 'block';
@@ -1425,29 +1220,6 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     // 初始化列宽与拖拽调整（含持久化）
     loadColumnWidths();
     setupResizableHeaders();
-
-    // NXFXB：展开时懒加载
-    let nxfxbInited = false;
-    const marketDetails = document.getElementById('marketEntryDetails');
-    if (marketDetails) {
-      marketDetails.addEventListener('toggle', () => {
-        if (!marketDetails.open) return;
-        if (nxfxbInited) return;
-        nxfxbInited = true;
-        vscode.postMessage({ type: 'nxfxb.init' });
-      });
-    }
-    const btnNxfxbRefresh = document.getElementById('btnNxfxbRefresh');
-    if (btnNxfxbRefresh) {
-      btnNxfxbRefresh.addEventListener('click', () => vscode.postMessage({ type: 'nxfxb.refresh' }));
-    }
-    document.querySelectorAll('button[data-open-panel]').forEach((b) => {
-      b.addEventListener('click', (e) => {
-        const kind = e.target && e.target.getAttribute ? e.target.getAttribute('data-open-panel') : '';
-        if (!kind) return;
-        vscode.postMessage({ type: 'market.openPanel', kind });
-      });
-    });
 
     document.getElementById('btnAdd').addEventListener('click', () => vscode.postMessage({ type: 'addStock' }));
     document.getElementById('btnRefresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));

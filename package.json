@@ -2,7 +2,7 @@
   "name": "traderx",
   "displayName": "TraderX A股自选",
   "description": "A股自选行情、主力净流入与持仓盈亏（本地）",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "publisher": "traderx",
   "engines": {
     "vscode": "^1.85.0"
@@ -12,6 +12,9 @@
   ],
   "activationEvents": [
     "onView:traderx.watchlistView",
+    "onView:traderx.marketNavigator",
+    "onCommand:traderx.openMarket",
+    "onCommand:traderx.market.openPage",
     "onCommand:traderx.addStock",
     "onCommand:traderx.removeStock",
     "onCommand:traderx.editPosition",
@@ -22,9 +25,7 @@
     "onCommand:traderx.openIntraday",
     "onCommand:traderx.openIntradayPickPlatform",
     "onCommand:traderx.openGroupManage",
-    "onCommand:traderx.openSettings",
-    "onCommand:traderx.openMarket",
-    "onCommand:traderx.openMarketPanel"
+    "onCommand:traderx.openSettings"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -43,6 +44,10 @@
           "type": "webview",
           "id": "traderx.watchlistView",
           "name": "自选"
+        },
+        {
+          "id": "traderx.marketNavigator",
+          "name": "市场行情"
         }
       ]
     },
@@ -93,26 +98,11 @@
       },
       {
         "command": "traderx.openMarket",
-        "title": "TraderX: 市场行情"
+        "title": "TraderX: 打开市场行情"
       },
       {
-        "command": "traderx.openMarketPanel",
-        "title": "TraderX: 打开市场榜单面板"
-      },
-      {
-        "command": "traderx.toggleBossMode",
-        "title": "TraderX: 切换老板模式（市场行情置灰）"
-      },
-      {
-        "command": "traderx.debugNxfxbSnapshot",
-        "title": "TraderX: 输出 NXFXB 对照快照"
-      }
-    ],
-    "keybindings": [
-      {
-        "command": "traderx.toggleBossMode",
-        "key": "ctrl+alt+b",
-        "when": "editorTextFocus || view == traderx.watchlistView"
+        "command": "traderx.market.openPage",
+        "title": "TraderX: 打开市场行情子页"
       }
     ],
     "configuration": {
@@ -152,7 +142,7 @@
         "traderx.intradayStealthMode": {
           "type": "boolean",
           "default": false,
-          "description": "低调办公：侧栏灰度；分时固定东财 h5chart-iframe（与 LeekHub/leek-fund 同源）。开启后忽略分时查看方式与站点"
+          "description": "低调办公：页面更低调显示；分时固定打开低调分时页。开启后忽略分时查看方式与站点"
         },
         "traderx.intradayDisplayMode": {
           "type": "string",
@@ -170,17 +160,14 @@
             "eastmoney_discreet"
           ],
           "default": "eastmoney_full",
-          "description": "行情页站点：东方财富完整行情（PC 个股页）或东方财富低调模式（basic/h5chart-iframe，与韭菜盒子 LeekFund 一致）。历史 eastmoney/sina/tencent 将映射为完整行情"
+          "description": "行情页站点：东方财富完整行情（PC 个股页）或东方财富低调分时页。历史 eastmoney/sina/tencent 将映射为完整行情"
         },
-        "traderx.bossMode": {
-          "type": "boolean",
-          "default": false,
-          "description": "老板模式：仅将“市场行情”模块置灰并禁用交互（自选栏不受影响）"
-        },
-        "traderx.networkProxy": {
-          "type": "string",
-          "default": "",
-          "description": "网络代理（可选）：例如 http://127.0.0.1:7890 ，用于在部分网络环境下访问受限域名"
+        "traderx.marketFetchTimeoutMs": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 5000,
+          "maximum": 120000,
+          "description": "市场行情（全球股指/行业排行/资金流向）请求超时（毫秒）"
         }
       }
     }
@@ -191,7 +178,6 @@
     "watch": "tsc -watch -p ./"
   },
   "dependencies": {
-    "https-proxy-agent": "^9.0.0",
     "iconv-lite": "^0.6.3"
   },
   "devDependencies": {

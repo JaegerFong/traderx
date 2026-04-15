@@ -17,7 +17,14 @@ export interface GroupSortState {
   dir: number;
 }
 
-const DEFAULT_SORT: GroupSortState = { key: 'code', dir: 1 };
+const DEFAULT_SORT: GroupSortState = { key: 'name', dir: 1 };
+
+/** 表头已移除的列，历史排序需回退 */
+const LEGACY_SORT_KEYS = new Set(['code', 'high', 'low', 'amountYuan']);
+
+function normalizeSortKey(key: string): string {
+  return LEGACY_SORT_KEYS.has(key) ? 'name' : key;
+}
 
 export interface WatchlistGroup {
   id: string;
@@ -251,7 +258,7 @@ export class WatchlistStore {
     const all = this.ctx.globalState.get<Record<string, GroupSortState>>(KEY_SORT_BY_GROUP, {});
     const s = all[groupId];
     if (s && typeof s.key === 'string' && (s.dir === 1 || s.dir === -1)) {
-      return { key: s.key, dir: s.dir };
+      return { key: normalizeSortKey(s.key), dir: s.dir };
     }
     return { ...DEFAULT_SORT };
   }

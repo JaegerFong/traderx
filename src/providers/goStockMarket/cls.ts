@@ -126,7 +126,7 @@ export interface ClsTelegraphItem {
   source: '财联社电报';
 }
 
-/** 对齐 go-stock：nodeapi/telegraphList，最多取前 limit 条 */
+/** 财联社电报：nodeapi/telegraphList，最多取前 limit 条 */
 export async function fetchClsTelegraphList(limit = 50, timeoutMs = 15000): Promise<ClsTelegraphItem[]> {
   const url = 'https://www.cls.cn/nodeapi/telegraphList';
   const text = await fetchText(url, {

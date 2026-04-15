@@ -1,85 +1,121 @@
 import * as vscode from 'vscode';
 import { DEFAULT_GROUP_ID, type WatchlistStore } from './storage/watchlistStore';
+import {
+  isStealthOfficeEnabled,
+  STEALTH_OFFICE_STYLE_SNIPPET,
+  stealthOfficeBodyAttrs,
+  stealthOfficeContentWrap,
+} from './stealthOfficeWebview';
+
+let groupManagePanel: vscode.WebviewPanel | undefined;
+let groupManageStore: WatchlistStore | undefined;
+let groupManageOnGroupsChanged: (() => void) | undefined;
 
 export function openGroupManagePanel(
   store: WatchlistStore,
   onGroupsChanged: () => void,
 ): void {
-  const panel = vscode.window.createWebviewPanel(
-    'traderx.groupManage',
-    'TraderX 分组管理',
-    vscode.ViewColumn.One,
-    { enableScripts: true, retainContextWhenHidden: true },
-  );
-
-  const pushState = (): void => {
-    const groups = store.getGroups();
-    panel.webview.postMessage({ type: 'state', groups });
-  };
-
-  panel.webview.onDidReceiveMessage(
-    async (msg: { type?: string; id?: string; name?: string }) => {
-      if (msg.type === 'ready') {
-        pushState();
-        return;
-      }
-      if (msg.type === 'create') {
-        const name = await vscode.window.showInputBox({ title: '新建分组', prompt: '分组名称' });
-        if (name !== undefined && name.trim()) {
-          await store.createGroup(name);
-          onGroupsChanged();
-          pushState();
-        }
-        return;
-      }
-      if (msg.type === 'rename' && msg.id) {
-        const g = store.getGroupById(msg.id);
-        if (!g) {
+  groupManageStore = store;
+  groupManageOnGroupsChanged = onGroupsChanged;
+  if (groupManagePanel) {
+    groupManagePanel.reveal(vscode.ViewColumn.One);
+  } else {
+    groupManagePanel = vscode.window.createWebviewPanel(
+      'traderx.groupManage',
+      'TraderX 分组管理',
+      vscode.ViewColumn.One,
+      { enableScripts: true, retainContextWhenHidden: true },
+    );
+    groupManagePanel.onDidDispose(() => {
+      groupManagePanel = undefined;
+      groupManageStore = undefined;
+      groupManageOnGroupsChanged = undefined;
+    });
+    groupManagePanel.webview.onDidReceiveMessage(
+      async (msg: { type?: string; id?: string; name?: string }) => {
+        const panel = groupManagePanel;
+        const store = groupManageStore;
+        const onGroupsChanged = groupManageOnGroupsChanged;
+        if (!panel || !store || !onGroupsChanged) {
           return;
         }
-        const name = await vscode.window.showInputBox({ title: '重命名分组', value: g.name });
-        if (name !== undefined && name.trim()) {
-          await store.renameGroup(msg.id, name);
-          onGroupsChanged();
+        const pushState = (): void => {
+          const groups = store.getGroups();
+          panel.webview.postMessage({ type: 'state', groups });
+        };
+        if (msg.type === 'ready') {
           pushState();
-        }
-        return;
-      }
-      if (msg.type === 'delete' && msg.id) {
-        if (msg.id === DEFAULT_GROUP_ID) {
-          vscode.window.showWarningMessage('默认分组「自选」不可删除');
           return;
         }
-        const ok = await vscode.window.showWarningMessage(
-          `确定删除分组？其中股票将合并到「自选」。`,
-          { modal: true },
-          '删除',
-        );
-        if (ok === '删除') {
-          try {
-            await store.deleteGroup(msg.id);
+        if (msg.type === 'create') {
+          const name = await vscode.window.showInputBox({ title: '新建分组', prompt: '分组名称' });
+          if (name !== undefined && name.trim()) {
+            await store.createGroup(name);
             onGroupsChanged();
             pushState();
-          } catch (e) {
-            vscode.window.showErrorMessage(e instanceof Error ? e.message : String(e));
           }
+          return;
         }
-        return;
-      }
-    },
-    undefined,
-    [],
-  );
+        if (msg.type === 'rename' && msg.id) {
+          const g = store.getGroupById(msg.id);
+          if (!g) {
+            return;
+          }
+          const name = await vscode.window.showInputBox({ title: '重命名分组', value: g.name });
+          if (name !== undefined && name.trim()) {
+            await store.renameGroup(msg.id, name);
+            onGroupsChanged();
+            pushState();
+          }
+          return;
+        }
+        if (msg.type === 'delete' && msg.id) {
+          if (msg.id === DEFAULT_GROUP_ID) {
+            vscode.window.showWarningMessage('默认分组「自选」不可删除');
+            return;
+          }
+          const ok = await vscode.window.showWarningMessage(
+            `确定删除分组？其中股票将合并到「自选」。`,
+            { modal: true },
+            '删除',
+          );
+          if (ok === '删除') {
+            try {
+              await store.deleteGroup(msg.id);
+              onGroupsChanged();
+              pushState();
+            } catch (e) {
+              vscode.window.showErrorMessage(e instanceof Error ? e.message : String(e));
+            }
+          }
+          return;
+        }
+      },
+      undefined,
+      [],
+    );
+  }
 
-  panel.webview.html = buildGroupManageHtml();
+  groupManagePanel.webview.html = buildGroupManageHtml(isStealthOfficeEnabled());
+  // 触发刷新（若页面已加载则会立刻更新）
+  const groups = store.getGroups();
+  void groupManagePanel.webview.postMessage({ type: 'state', groups });
 }
 
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function buildGroupManageHtml(): string {
+function buildGroupManageHtml(stealth: boolean): string {
   const nonce = String(Math.random()).slice(2);
+  const main = `
+  <h1>分组管理</h1>
+  <p class="hint">默认分组「自选」不可删除；删除分组时，其中股票会合并到「自选」。</p>
+  <button id="btnNew">新建分组</button>
+  <table>
+    <thead><tr><th>名称</th><th>股票数</th><th>操作</th></tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>`;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -96,16 +132,11 @@ function buildGroupManageHtml(): string {
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--vscode-panel-border); }
     th { color: var(--vscode-descriptionForeground); font-weight: 600; }
     .actions button { margin: 0 6px 0 0; padding: 4px 8px; font-size: 12px; }
+    ${STEALTH_OFFICE_STYLE_SNIPPET}
   </style>
 </head>
-<body>
-  <h1>分组管理</h1>
-  <p class="hint">默认分组「自选」不可删除；删除分组时，其中股票会合并到「自选」。</p>
-  <button id="btnNew">新建分组</button>
-  <table>
-    <thead><tr><th>名称</th><th>股票数</th><th>操作</th></tr></thead>
-    <tbody id="tbody"></tbody>
-  </table>
+<body${stealthOfficeBodyAttrs(stealth)}>
+  ${stealthOfficeContentWrap(stealth, main)}
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     function render(groups) {

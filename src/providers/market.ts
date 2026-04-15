@@ -55,7 +55,8 @@ export function isLikelyPush2BlockedError(e: unknown): boolean {
   );
 }
 
-async function fetchTextPush2(pathAndQuery: string, timeoutMs: number): Promise<string> {
+/** 东财 push2 拉取（多域名回退、短连接），供 `eastmoney.ts` 等复用 */
+export async function fetchTextPush2(pathAndQuery: string, timeoutMs: number): Promise<string> {
   let lastErr: unknown;
   for (let i = 0; i < PUSH2_HOSTS.length; i++) {
     const host = PUSH2_HOSTS[i]!;

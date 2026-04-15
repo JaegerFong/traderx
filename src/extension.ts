@@ -2,17 +2,14 @@ import * as vscode from 'vscode';
 import { pickStockWithSearch } from './addStockPicker';
 import { openGroupManagePanel } from './groupManagePanel';
 import { openIntradayPanel, openIntradayQuotePage } from './intradayPanel';
-import { openMarketPanel } from './marketPanels/marketPanel';
-import { openRankPanel } from './marketPanels/rankPanel';
 import type { IntradayPageProvider } from './stockUrls';
 import type { NormalizedCode } from './stockCode';
 import { QuoteService } from './services/quoteService';
 import { openTraderxSettingsPanel } from './settingsPanel';
 import { DEFAULT_GROUP_ID, WatchlistStore } from './storage/watchlistStore';
+import { openMarketPage } from './marketDetailPanel';
+import { MarketNavigatorProvider, type MarketOpenPayload } from './marketNavigatorTree';
 import { WatchlistViewProvider } from './watchlistView';
-import { fetchNxfxbHotTheme, fetchNxfxbHsgtSeries, fetchNxfxbUpDownData } from './providers/leekNxfxb';
-
-const MARKET_KINDS = ['topConcepts', 'topIndustries', 'limitUp', 'limitDown', 'conceptTopStocks'] as const;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const store = new WatchlistStore(context);
@@ -22,6 +19,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const watchView = new WatchlistViewProvider(context, store, quoteService);
 
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(WatchlistViewProvider.viewId, watchView));
+
+  const marketNav = new MarketNavigatorProvider();
+  context.subscriptions.push(vscode.window.registerTreeDataProvider(MarketNavigatorProvider.viewId, marketNav));
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.openMarket', async () => {
+      await vscode.commands.executeCommand('workbench.view.extension.traderx');
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.market.openPage', (payload: MarketOpenPayload) => {
+      openMarketPage(context, payload);
+    }),
+  );
 
   const refreshWatch = (): void => {
     void watchView.refresh('external');
@@ -200,7 +212,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const intradayPlatformChoices: { label: string; description: string; provider: IntradayPageProvider }[] = [
     { label: '东方财富完整行情', description: 'PC 个股页', provider: 'eastmoney_full' },
-    { label: '东方财富低调模式', description: 'h5chart 分时（LeekFund 同源）', provider: 'eastmoney_discreet' },
+    { label: '东方财富低调分时页', description: 'h5chart 分时', provider: 'eastmoney_discreet' },
   ];
 
   context.subscriptions.push(
@@ -244,49 +256,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       openTraderxSettingsPanel(() => watchView.refreshUiOnly('settingsSaved'));
     }),
   );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand('traderx.openMarket', () => {
-      openMarketPanel(context);
-    }),
-  );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand('traderx.openMarketPanel', (kind?: string) => {
-      const k = typeof kind === 'string' ? kind : '';
-      if (!MARKET_KINDS.includes(k as any)) {
-        vscode.window.showWarningMessage('未知的榜单类型');
-        return;
-      }
-      openRankPanel(context, k as any);
-    }),
-  );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand('traderx.toggleBossMode', async () => {
-      const cfg = vscode.workspace.getConfiguration('traderx');
-      const cur = cfg.get<boolean>('bossMode') === true;
-      await cfg.update('bossMode', !cur, true);
-      vscode.window.showInformationMessage(`老板模式：${!cur ? '已开启' : '已关闭'}`);
-    }),
-  );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand('traderx.debugNxfxbSnapshot', async () => {
-      const out = vscode.window.createOutputChannel('TraderX NXFXB');
-      out.show(true);
-      out.appendLine(`[${new Date().toISOString()}] 开始拉取 NXFXB 数据…`);
-      try {
-        const [u, h, s] = await Promise.all([fetchNxfxbUpDownData(), fetchNxfxbHotTheme(), fetchNxfxbHsgtSeries()]);
-        out.appendLine(`UpDownData:\n${JSON.stringify(u, null, 2)}`);
-        out.appendLine(`HotTheme(top10):\n${JSON.stringify(h.slice(0, 10), null, 2)}`);
-        out.appendLine(`HSGT(series,len=${s.length}):\n${s.slice(Math.max(0, s.length - 5)).join('\n')}`);
-        out.appendLine('---');
-      } catch (e) {
-        out.appendLine(`ERROR: ${e instanceof Error ? e.stack || e.message : String(e)}`);
-      }
-    }),
-  );
 }
 
 export function deactivate(): void {}
+

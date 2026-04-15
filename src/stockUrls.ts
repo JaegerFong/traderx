@@ -1,9 +1,9 @@
 import type { NormalizedCode } from './stockCode';
 
 /**
- * 行情页站点（仅东方财富两种，与韭菜盒子 LeekFund 同源域名 `quote.eastmoney.com`）。
+ * 行情页站点（仅东方财富两种，域名 `quote.eastmoney.com`）。
  * - `eastmoney_full`：PC 完整个股页
- * - `eastmoney_discreet`：`basic/h5chart-iframe.html` 分时页（LeekFund 沪深股票在 K 线开关下使用）
+ * - `eastmoney_discreet`：`basic/h5chart-iframe.html` 分时页
  */
 export type IntradayPageProvider = 'eastmoney_full' | 'eastmoney_discreet';
 
@@ -14,7 +14,7 @@ function normalizeProvider(raw: string): IntradayPageProvider {
   return 'eastmoney_full';
 }
 
-/** LeekFund：沪深 `market` 沪 1 / 深 0，`code` 为 6 位数字 */
+/** 沪深 `market` 沪 1 / 深 0，`code` 为 6 位数字 */
 export function getEastmoneyH5IntradayUrl(code: NormalizedCode): string {
   const m = /^(sh|sz|bj)(\d{6})$/.exec(code);
   if (!m) {
