@@ -7,6 +7,7 @@ const KEY_GROUPS = 'traderx.watchlist.groups';
 const KEY_ACTIVE = 'traderx.watchlist.activeGroupId';
 const KEY_POS = 'traderx.watchlist.positions';
 const KEY_SORT_BY_GROUP = 'traderx.watchlist.sortByGroup';
+const KEY_ALERTS = 'traderx.watchlist.alerts';
 
 export const DEFAULT_GROUP_ID = 'default';
 
@@ -32,8 +33,27 @@ export interface WatchlistGroup {
   codes: NormalizedCode[];
 }
 
+export type StockAlertType = 'price' | 'changePct';
+
+export interface StockAlert {
+  id: string;
+  code: NormalizedCode;
+  type: StockAlertType;
+  /** 目标值：price=元；changePct=% */
+  target: number;
+  /** 方向：>= 或 <= */
+  op: '>=' | '<=';
+  createdAt: number;
+  /** 触发后记录，避免每次刷新重复通知 */
+  triggeredAt?: number;
+}
+
 function newGroupId(): string {
   return `g_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function newAlertId(): string {
+  return `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function dedupeCodes(codes: NormalizedCode[]): NormalizedCode[] {
@@ -80,6 +100,33 @@ export class WatchlistStore {
   private async setGroups(groups: WatchlistGroup[]): Promise<void> {
     await this.readyPromise;
     await this.ctx.globalState.update(KEY_GROUPS, groups);
+  }
+
+  /** 按传入 id 顺序重排分组并持久化（默认分组始终置顶） */
+  async reorderGroups(order: string[]): Promise<void> {
+    await this.readyPromise;
+    const groups = this.getGroups();
+    const map = new Map(groups.map((g) => [g.id, g]));
+    const picked: WatchlistGroup[] = [];
+    for (const id of order) {
+      const g = map.get(id);
+      if (g) {
+        picked.push(g);
+        map.delete(id);
+      }
+    }
+    // 兼容：新分组/缺失 id 追加到末尾（但默认分组固定在最前）
+    const rest = Array.from(map.values());
+    let next = [...picked, ...rest];
+    const defIdx = next.findIndex((g) => g.id === DEFAULT_GROUP_ID);
+    if (defIdx > 0) {
+      const [def] = next.splice(defIdx, 1);
+      next = [def!, ...next];
+    }
+    if (defIdx < 0) {
+      next = [{ id: DEFAULT_GROUP_ID, name: '自选', codes: [] }, ...next];
+    }
+    await this.setGroups(next);
   }
 
   getActiveGroupId(): string {
@@ -268,5 +315,50 @@ export class WatchlistStore {
     const all = { ...this.ctx.globalState.get<Record<string, GroupSortState>>(KEY_SORT_BY_GROUP, {}) };
     all[groupId] = { key: state.key, dir: state.dir };
     await this.ctx.globalState.update(KEY_SORT_BY_GROUP, all);
+  }
+
+  getAlerts(): StockAlert[] {
+    const raw = this.ctx.globalState.get<StockAlert[]>(KEY_ALERTS, []);
+    // 浅拷贝防止外部修改
+    return raw.map((a) => ({ ...a }));
+  }
+
+  getAlertsForCode(code: NormalizedCode): StockAlert[] {
+    return this.getAlerts().filter((a) => a.code === code);
+  }
+
+  async addAlert(alert: Omit<StockAlert, 'id' | 'createdAt' | 'triggeredAt'>): Promise<StockAlert> {
+    await this.readyPromise;
+    const all = this.getAlerts();
+    const created: StockAlert = { ...alert, id: newAlertId(), createdAt: Date.now() };
+    all.push(created);
+    await this.ctx.globalState.update(KEY_ALERTS, all);
+    return created;
+  }
+
+  async clearAlertsForCode(code: NormalizedCode): Promise<void> {
+    await this.readyPromise;
+    const all = this.getAlerts().filter((a) => a.code !== code);
+    await this.ctx.globalState.update(KEY_ALERTS, all);
+  }
+
+  async removeAlert(id: string): Promise<void> {
+    await this.readyPromise;
+    const all = this.getAlerts().filter((a) => a.id !== id);
+    await this.ctx.globalState.update(KEY_ALERTS, all);
+  }
+
+  async markAlertTriggered(id: string, when: number = Date.now()): Promise<void> {
+    await this.readyPromise;
+    const all = this.getAlerts();
+    const a = all.find((x) => x.id === id);
+    if (!a) {
+      return;
+    }
+    if (a.triggeredAt) {
+      return;
+    }
+    a.triggeredAt = when;
+    await this.ctx.globalState.update(KEY_ALERTS, all);
   }
 }

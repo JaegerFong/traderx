@@ -108,6 +108,66 @@ function shouldRetryWithNode(e: unknown): boolean {
   return isTransientNetError(e);
 }
 
+/** Node https：返回原始 Buffer（用于非 UTF-8 编码接口，如 GBK） */
+async function fetchBufferNodeHttps(urlStr: string, headers: Record<string, string>, timeoutMs: number): Promise<Buffer> {
+  let lastErr: unknown;
+  const attempts = [false, true];
+  for (let i = 0; i < attempts.length; i++) {
+    const noKeepAlive = attempts[i]!;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await fetchBufferNodeHttpsOnce(urlStr, headers, timeoutMs, noKeepAlive);
+      } catch (e) {
+        lastErr = e;
+        if (!isTransientNetError(e) || attempt === 2) {
+          break;
+        }
+        await sleep(300 * (attempt + 1));
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+function fetchBufferNodeHttpsOnce(
+  urlStr: string,
+  headers: Record<string, string>,
+  timeoutMs: number,
+  disableAgent: boolean,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const req = https.request(
+      {
+        hostname: u.hostname,
+        port: u.port || 443,
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers,
+        timeout: timeoutMs,
+        rejectUnauthorized: true,
+        agent: disableAgent ? undefined : httpsAgent,
+      },
+      (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          res.resume();
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on('data', (ch) => chunks.push(ch as Buffer));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+      },
+    );
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('请求超时'));
+    });
+    req.end();
+  });
+}
+
 export async function fetchText(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<string> {
   const { timeoutMs = 20000, ...rest } = init ?? {};
   const headers = mergeHeaders(rest);
@@ -151,8 +211,7 @@ export async function fetchBuffer(url: string, init?: RequestInit & { timeoutMs?
     return Buffer.from(await res.arrayBuffer());
   } catch (e) {
     if (url.startsWith('https://') && shouldRetryWithNode(e)) {
-      const text = await fetchTextNodeHttps(url, headers, timeoutMs);
-      return Buffer.from(text, 'utf8');
+      return fetchBufferNodeHttps(url, headers, timeoutMs);
     }
     throw e;
   } finally {

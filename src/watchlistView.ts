@@ -6,15 +6,23 @@ import type { NormalizedCode } from './stockCode';
 import type { QuoteRow } from './types';
 import { fetchEastmoneyMainForceOne, mapLimit } from './providers/eastmoney';
 import { STEALTH_OFFICE_STYLE_SNIPPET } from './stealthOfficeWebview';
+import { fetchIndexQuotes } from './providers/market';
 
 export class WatchlistViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewId = 'traderx.watchlistView';
+  /** 底部 Panel 容器中的自选（与侧栏可同时存在，便于拖到终端区停靠） */
+  public static readonly viewIdPanel = 'traderx.watchlistView.panel';
 
-  private view?: vscode.WebviewView;
+  private readonly webviews = new Set<vscode.WebviewView>();
   private refreshTimer?: ReturnType<typeof setInterval>;
   private seq = 0;
   private registeredConfigListener = false;
   private rowCache = new Map<string, QuoteRow>();
+  private indicesCache: { updatedAt: number; rows: Array<{ name: string; price: number | null; changePct: number | null }> } = {
+    updatedAt: 0,
+    rows: [],
+  };
+  private indicesRefreshing = false;
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
@@ -22,8 +30,46 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     private readonly quoteService: QuoteService,
   ) {}
 
+  private postMessageAll(message: unknown): void {
+    for (const wv of this.webviews) {
+      void wv.webview.postMessage(message);
+    }
+  }
+
+  private getIndicesSnapshotSync(): {
+    indices: Array<{ name: string; price: number | null; changePct: number | null }>;
+    indicesUpdatedAt: number;
+  } {
+    return { indices: this.indicesCache.rows, indicesUpdatedAt: this.indicesCache.updatedAt };
+  }
+
+  /** 异步刷新指数并单独推送，避免阻塞自选列表首屏渲染 */
+  private refreshIndicesIfStale(): void {
+    const now = Date.now();
+    if (this.indicesRefreshing) {
+      return;
+    }
+    if (this.indicesCache.rows.length > 0 && now - this.indicesCache.updatedAt < 10_000) {
+      return;
+    }
+    this.indicesRefreshing = true;
+    void (async () => {
+      try {
+        const res = await fetchIndexQuotes();
+        const rows = res.map((x) => ({ name: x.name, price: x.price, changePct: x.changePct }));
+        this.indicesCache = { updatedAt: Date.now(), rows };
+        const snap = this.getIndicesSnapshotSync();
+        this.postMessageAll({ type: 'indices', ...snap });
+      } catch {
+        // ignore
+      } finally {
+        this.indicesRefreshing = false;
+      }
+    })();
+  }
+
   resolveWebviewView(webviewView: vscode.WebviewView): void {
-    this.view = webviewView;
+    this.webviews.add(webviewView);
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [this.ctx.extensionUri],
@@ -37,8 +83,10 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     });
 
     webviewView.onDidDispose(() => {
-      this.clearRefreshTimer();
-      this.view = undefined;
+      this.webviews.delete(webviewView);
+      if (this.webviews.size === 0) {
+        this.clearRefreshTimer();
+      }
     });
 
     webviewView.onDidChangeVisibility(() => {
@@ -122,12 +170,15 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
             return this.buildSkeletonRows([c], positions)[0]!;
           });
 
-    this.view?.webview.postMessage({
+    const idx = this.getIndicesSnapshotSync();
+    this.postMessageAll({
       type: 'update',
       reason,
       rows,
       turnoverDisplay,
       updatedAt: Date.now(),
+      indices: idx.indices,
+      indicesUpdatedAt: idx.indicesUpdatedAt,
       groups,
       activeGroupId: gid,
       quotesLoading: false,
@@ -135,6 +186,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       sortKey: sort.key,
       sortDir: sort.dir,
     });
+    this.refreshIndicesIfStale();
   }
 
   private buildSkeletonRows(
@@ -190,13 +242,16 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       // 必须在 push 时重新读分组与排序：若在 await 行情期间用户点了排序，闭包里的旧 sort 会覆盖倒序
       const gid = this.store.getActiveGroupId();
       const sort = this.store.getSortForGroup(gid);
-      this.view?.webview.postMessage({
+      const idx = this.getIndicesSnapshotSync();
+      this.postMessageAll({
         type: 'update',
         reason: reason + payload.reasonSuffix,
         rows: payload.rows,
         turnoverDisplay,
         error: payload.error,
         updatedAt: Date.now(),
+        indices: idx.indices,
+        indicesUpdatedAt: idx.indicesUpdatedAt,
         groups,
         activeGroupId: gid,
         quotesLoading: payload.quotesLoading,
@@ -204,6 +259,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
         sortKey: sort.key,
         sortDir: sort.dir,
       });
+      this.refreshIndicesIfStale();
     };
 
     if (!quietRefresh && codes.length > 0) {
@@ -238,6 +294,9 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       this.rowCache.set(r.code, r);
     }
     push({ rows: basic, quotesLoading: true, reasonSuffix: '-basic' });
+
+    // 监听触发（用基础行情即可：速度快；主力净流入不影响阈值）
+    void this.checkAndFireAlerts(basic);
 
     if (my !== this.seq) {
       return;
@@ -303,7 +362,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     error?: string;
   }): void {
     const snap = this.getUiStateSnapshot();
-    this.view?.webview.postMessage({
+    const idx = this.getIndicesSnapshotSync();
+    this.postMessageAll({
       type: 'patch',
       reason: payload.reason,
       upserts: payload.upserts ?? [],
@@ -311,6 +371,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       quotesLoading: !!payload.quotesLoading,
       error: payload.error,
       updatedAt: Date.now(),
+      indices: idx.indices,
+      indicesUpdatedAt: idx.indicesUpdatedAt,
       groups: snap.groups,
       activeGroupId: snap.activeGroupId,
       turnoverDisplay: snap.turnoverDisplay,
@@ -318,6 +380,88 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       sortKey: snap.sortKey,
       sortDir: snap.sortDir,
     });
+    this.refreshIndicesIfStale();
+  }
+
+  private async checkAndFireAlerts(rows: QuoteRow[]): Promise<void> {
+    const alerts = this.store.getAlerts().filter((a) => !a.triggeredAt);
+    if (alerts.length === 0) {
+      return;
+    }
+    const byCode = new Map<string, QuoteRow>();
+    for (const r of rows) {
+      byCode.set(r.code, r);
+    }
+    for (const a of alerts) {
+      const r = byCode.get(a.code);
+      if (!r) continue;
+      let cur: number | null = null;
+      let label = '';
+      if (a.type === 'price') {
+        cur = r.price ?? null;
+        label = '价格';
+      } else {
+        cur = r.changePct ?? null;
+        label = '涨跌幅%';
+      }
+      if (cur === null || Number.isNaN(cur)) continue;
+      const hit = a.op === '>=' ? cur >= a.target : cur <= a.target;
+      if (!hit) continue;
+
+      await this.store.markAlertTriggered(a.id);
+      const title = `TraderX 监听触发：${r.name}（${r.code}）`;
+      const curStr = a.type === 'price' ? `${cur.toFixed(2)} 元` : `${cur.toFixed(2)} %`;
+      const targetStr = a.type === 'price' ? `${a.target.toFixed(2)} 元` : `${a.target.toFixed(2)} %`;
+      const actionClear = '清理该股监听';
+      const actionEdit = '继续设置…';
+      const picked = await vscode.window.showInformationMessage(`${label} ${a.op} ${targetStr}（当前 ${curStr}）`, actionClear, actionEdit);
+      if (picked === actionClear) {
+        await this.store.clearAlertsForCode(a.code);
+      } else if (picked === actionEdit) {
+        await this.openAlertWizard(a.code);
+      }
+    }
+  }
+
+  private async openAlertWizard(code: NormalizedCode): Promise<void> {
+    const kind = await vscode.window.showQuickPick(
+      [
+        { label: '监听股价到指定价格', v: 'price' as const },
+        { label: '监听涨跌幅到指定涨幅', v: 'changePct' as const },
+        { label: '清理该股监听', v: 'clear' as const },
+      ],
+      { placeHolder: `设置监听：${code}` },
+    );
+    if (!kind) {
+      return;
+    }
+    if (kind.v === 'clear') {
+      await this.store.clearAlertsForCode(code);
+      vscode.window.showInformationMessage(`已清理监听：${code}`);
+      return;
+    }
+    const op = await vscode.window.showQuickPick(
+      [
+        { label: '达到或高于（>=）', v: '>=' as const },
+        { label: '达到或低于（<=）', v: '<=' as const },
+      ],
+      { placeHolder: '触发条件' },
+    );
+    if (!op) {
+      return;
+    }
+    const prompt = kind.v === 'price' ? '目标价（元）' : '目标涨跌幅（%）';
+    const raw = await vscode.window.showInputBox({ title: `设置监听：${code}`, prompt });
+    if (raw === undefined) {
+      return;
+    }
+    const v = Number(raw.trim());
+    if (!Number.isFinite(v)) {
+      vscode.window.showErrorMessage('输入的目标值无效');
+      return;
+    }
+    await this.store.addAlert({ code, type: kind.v, target: v, op: op.v });
+    vscode.window.showInformationMessage(`已设置监听：${code}`);
   }
 
   private async postPatchAddToActiveGroup(code: NormalizedCode, reason: string): Promise<void> {
@@ -497,6 +641,15 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     }
     if (type === 'editPosition' && typeof msg.code === 'string') {
       await vscode.commands.executeCommand('traderx.editPosition', msg.code);
+      return;
+    }
+    if (type === 'setAlert' && typeof msg.code === 'string') {
+      await this.openAlertWizard(msg.code as NormalizedCode);
+      return;
+    }
+    if (type === 'clearAlerts' && typeof msg.code === 'string') {
+      await this.store.clearAlertsForCode(msg.code as NormalizedCode);
+      vscode.window.showInformationMessage(`已清理监听：${msg.code}`);
       return;
     }
     if (type === 'refresh') {
@@ -765,10 +918,11 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     }
     details.reserve {
       margin-top: 10px;
-      border: 1px dashed var(--border);
-      border-radius: 4px;
+      border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+      border-radius: 6px;
       padding: 8px;
       color: var(--muted);
+      background: color-mix(in srgb, var(--vscode-editor-background) 92%, white 8%);
     }
     details.reserve:first-of-type {
       margin-top: 0;
@@ -778,6 +932,19 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       font-weight: 600;
       color: var(--vscode-foreground);
     }
+    .indices-line {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 2px 0 8px 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .idx-item { white-space: nowrap; }
+    .idx-item .nm { opacity: .9; }
+    .idx-item .px { color: var(--vscode-foreground); }
+    .idx-item .pct { margin-left: 4px; }
 
   </style>
 </head>
@@ -787,6 +954,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
   <details class="reserve" id="watchlistDetails">
     <summary>自选栏</summary>
     <div class="watchlist-body">
+      <div class="indices-line" id="indicesLine" style="display:none"></div>
       <div class="bar-row">
         <label for="groupSelect" class="meta" style="flex-shrink:0;">分组</label>
         <div class="flex-grow">
@@ -845,6 +1013,9 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     let groups = [];
     let activeGroupId = '';
     let lastUpdatedAt = Date.now();
+    /** @type {{name:string,price:number|null,changePct:number|null}[]} */
+    let indices = [];
+    let indicesUpdatedAt = 0;
     let quotesLoading = false;
     let stealthMode = false;
     let turnoverDisplay = 'yi';
@@ -975,6 +1146,35 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       if (pct > 0) return 'cn-up';
       if (pct < 0) return 'cn-down';
       return '';
+    }
+
+    function renderIndicesLine() {
+      const el = document.getElementById('indicesLine');
+      if (!el) return;
+      if (!Array.isArray(indices) || indices.length === 0) {
+        el.style.display = 'none';
+        el.textContent = '';
+        return;
+      }
+      el.style.display = 'flex';
+      el.replaceChildren();
+      for (const it of indices) {
+        const wrap = document.createElement('span');
+        wrap.className = 'idx-item';
+        const nm = document.createElement('span');
+        nm.className = 'nm';
+        nm.textContent = (it.name || '—') + ': ';
+        const px = document.createElement('span');
+        px.className = 'px';
+        px.textContent = fmtNum(it.price, 2);
+        const pct = document.createElement('span');
+        pct.className = 'pct ' + clsForChange(it.changePct);
+        pct.textContent = fmtNum(it.changePct, 2) + '%';
+        wrap.appendChild(nm);
+        wrap.appendChild(px);
+        wrap.appendChild(pct);
+        el.appendChild(wrap);
+      }
     }
 
     function isShanghaiCallAuctionNow() {
@@ -1108,6 +1308,22 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       );
       tdAct.appendChild(
         mkIcon(
+          '设置监听（目标价/涨幅）',
+          'setAlert',
+          r.code,
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 14c1 0 1.8-.8 1.8-1.8H6.2C6.2 13.2 7 14 8 14z" fill="currentColor"/><path d="M13 11.5H3c.7-.7 1-1.5 1-2.5V7c0-2.2 1.3-4 3.2-4.6V2c0-.4.3-.7.7-.7s.7.3.7.7v.4C10.7 3 12 4.8 12 7v2c0 1 .3 1.8 1 2.5z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>',
+        ),
+      );
+      tdAct.appendChild(
+        mkIcon(
+          '清理监听',
+          'clearAlerts',
+          r.code,
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M4 4l8 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12 4L4 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
+        ),
+      );
+      tdAct.appendChild(
+        mkIcon(
           '清仓（清空成本/持仓）',
           'clearPosition',
           r.code,
@@ -1194,6 +1410,12 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     window.addEventListener('message', (event) => {
       const msg = event.data;
       if (!msg) return;
+      if (msg.type === 'indices') {
+        if (Array.isArray(msg.indices)) indices = msg.indices;
+        if (typeof msg.indicesUpdatedAt === 'number') indicesUpdatedAt = msg.indicesUpdatedAt;
+        renderIndicesLine();
+        return;
+      }
       if (msg.type === 'update') {
         rows = msg.rows || [];
         groups = msg.groups || [];
@@ -1202,6 +1424,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
         quotesLoading = !!msg.quotesLoading;
         stealthMode = !!msg.stealthMode;
         lastUpdatedAt = typeof msg.updatedAt === 'number' ? msg.updatedAt : Date.now();
+        if (Array.isArray(msg.indices)) indices = msg.indices;
+        if (typeof msg.indicesUpdatedAt === 'number') indicesUpdatedAt = msg.indicesUpdatedAt;
         if (typeof msg.sortKey === 'string') sortKey = msg.sortKey;
         if (typeof msg.sortDir === 'number') sortDir = msg.sortDir;
         if (typeof msg.reason === 'string' && msg.reason.startsWith('init')) {
@@ -1215,6 +1439,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
         quotesLoading = !!msg.quotesLoading;
         stealthMode = !!msg.stealthMode;
         lastUpdatedAt = typeof msg.updatedAt === 'number' ? msg.updatedAt : Date.now();
+        if (Array.isArray(msg.indices)) indices = msg.indices;
+        if (typeof msg.indicesUpdatedAt === 'number') indicesUpdatedAt = msg.indicesUpdatedAt;
         if (typeof msg.sortKey === 'string') sortKey = msg.sortKey;
         if (typeof msg.sortDir === 'number') sortDir = msg.sortDir;
         if (typeof msg.reason === 'string' && msg.reason.startsWith('init')) {
@@ -1225,6 +1451,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       }
 
       fillGroupSelect();
+      renderIndicesLine();
       document.body.classList.toggle('traderx-stealth-office', stealthMode);
       const err = document.getElementById('err');
       if (msg.error) {
@@ -1259,8 +1486,9 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
 
     document.getElementById('btnAdd').addEventListener('click', () => vscode.postMessage({ type: 'addStock' }));
     document.getElementById('btnRefresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
-    document.getElementById('groupSelect').addEventListener('change', (e) => {
-      const v = e.target.value;
+    document.getElementById('groupSelect').addEventListener('change', () => {
+      const sel = document.getElementById('groupSelect');
+      const v = sel && sel.value ? String(sel.value) : '';
       vscode.postMessage({ type: 'selectGroup', groupId: v });
     });
     document.getElementById('btnGroupManage').addEventListener('click', () => vscode.postMessage({ type: 'openGroupManage' }));

@@ -32,7 +32,7 @@ export function openGroupManagePanel(
       groupManageOnGroupsChanged = undefined;
     });
     groupManagePanel.webview.onDidReceiveMessage(
-      async (msg: { type?: string; id?: string; name?: string }) => {
+      async (msg: { type?: string; id?: string; name?: string; order?: string[] }) => {
         const panel = groupManagePanel;
         const store = groupManageStore;
         const onGroupsChanged = groupManageOnGroupsChanged;
@@ -90,6 +90,12 @@ export function openGroupManagePanel(
           }
           return;
         }
+        if (msg.type === 'reorder' && Array.isArray(msg.order)) {
+          await store.reorderGroups(msg.order);
+          onGroupsChanged();
+          pushState();
+          return;
+        }
       },
       undefined,
       [],
@@ -113,7 +119,7 @@ function buildGroupManageHtml(stealth: boolean): string {
   <p class="hint">默认分组「自选」不可删除；删除分组时，其中股票会合并到「自选」。</p>
   <button id="btnNew">新建分组</button>
   <table>
-    <thead><tr><th>名称</th><th>股票数</th><th>操作</th></tr></thead>
+    <thead><tr><th style="width:26px"></th><th>名称</th><th>股票数</th><th>操作</th></tr></thead>
     <tbody id="tbody"></tbody>
   </table>`;
   return `<!DOCTYPE html>
@@ -132,6 +138,9 @@ function buildGroupManageHtml(stealth: boolean): string {
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--vscode-panel-border); }
     th { color: var(--vscode-descriptionForeground); font-weight: 600; }
     .actions button { margin: 0 6px 0 0; padding: 4px 8px; font-size: 12px; }
+    tr.dragging { opacity: .6; }
+    td.handle { width: 26px; color: var(--vscode-descriptionForeground); cursor: grab; user-select:none; }
+    td.handle:active { cursor: grabbing; }
     ${STEALTH_OFFICE_STYLE_SNIPPET}
   </style>
 </head>
@@ -139,13 +148,17 @@ function buildGroupManageHtml(stealth: boolean): string {
   ${stealthOfficeContentWrap(stealth, main)}
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    let groupsCache = [];
     function render(groups) {
+      groupsCache = groups || [];
       const tb = document.getElementById('tbody');
       tb.innerHTML = '';
       for (const g of groups) {
         const tr = document.createElement('tr');
         const isDefault = g.id === ${JSON.stringify(DEFAULT_GROUP_ID)};
-        tr.innerHTML = '<td>' + esc(g.name) + '</td><td>' + g.codes.length + '</td><td class="actions"></td>';
+        tr.setAttribute('data-gid', g.id);
+        tr.draggable = !isDefault;
+        tr.innerHTML = '<td class="handle" title="拖动排序（默认分组固定置顶）">≡</td><td>' + esc(g.name) + '</td><td>' + g.codes.length + '</td><td class="actions"></td>';
         const td = tr.querySelector('.actions');
         if (!td) continue;
         const b1 = document.createElement('button');
@@ -170,6 +183,53 @@ function buildGroupManageHtml(stealth: boolean): string {
       if (e.data && e.data.type === 'state' && e.data.groups) {
         render(e.data.groups);
       }
+    });
+    let dragId = null;
+    function currentOrderIds() {
+      const ids = [];
+      document.querySelectorAll('#tbody tr[data-gid]').forEach((tr) => {
+        const id = tr.getAttribute('data-gid');
+        if (id) ids.push(id);
+      });
+      return ids;
+    }
+    document.addEventListener('dragstart', (e) => {
+      const tr = e.target && e.target.closest ? e.target.closest('tr[data-gid]') : null;
+      if (!tr) return;
+      const gid = tr.getAttribute('data-gid');
+      if (!gid || gid === ${JSON.stringify(DEFAULT_GROUP_ID)}) {
+        e.preventDefault();
+        return;
+      }
+      dragId = gid;
+      tr.classList.add('dragging');
+      e.dataTransfer && (e.dataTransfer.effectAllowed = 'move');
+    });
+    document.addEventListener('dragend', (e) => {
+      document.querySelectorAll('tr.dragging').forEach((x) => x.classList.remove('dragging'));
+      dragId = null;
+    });
+    document.addEventListener('dragover', (e) => {
+      if (!dragId) return;
+      const tr = e.target && e.target.closest ? e.target.closest('tr[data-gid]') : null;
+      if (!tr) return;
+      const overId = tr.getAttribute('data-gid');
+      if (!overId || overId === dragId) return;
+      if (overId === ${JSON.stringify(DEFAULT_GROUP_ID)}) return; // 默认分组固定
+      e.preventDefault();
+      const tb = document.getElementById('tbody');
+      const dragging = tb.querySelector('tr[data-gid=\"' + dragId + '\"]');
+      if (!dragging) return;
+      const rect = tr.getBoundingClientRect();
+      const before = (e.clientY - rect.top) < rect.height / 2;
+      if (before) tb.insertBefore(dragging, tr);
+      else tb.insertBefore(dragging, tr.nextSibling);
+    });
+    document.addEventListener('drop', (e) => {
+      if (!dragId) return;
+      e.preventDefault();
+      const ids = currentOrderIds();
+      vscode.postMessage({ type: 'reorder', order: ids });
     });
     document.getElementById('btnNew').onclick = () => vscode.postMessage({ type: 'create' });
     vscode.postMessage({ type: 'ready' });

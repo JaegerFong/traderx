@@ -43,6 +43,7 @@ export class MarketItem extends vscode.TreeItem {
 
 export class MarketNavigatorProvider implements vscode.TreeDataProvider<MarketItem> {
   public static readonly viewId = 'traderx.marketNavigator';
+  public static readonly viewIdPanel = 'traderx.marketNavigator.panel';
 
   private readonly _onDidChange = new vscode.EventEmitter<MarketItem | undefined | null | void>();
   readonly onDidChangeTreeData = this._onDidChange.event;

@@ -2,7 +2,7 @@
   "name": "traderx",
   "displayName": "TraderX A股自选",
   "description": "A股自选行情、主力净流入与持仓盈亏（本地）",
-  "version": "0.4.3",
+  "version": "0.4.8",
   "publisher": "traderx",
   "engines": {
     "vscode": "^1.85.0"
@@ -12,7 +12,9 @@
   ],
   "activationEvents": [
     "onView:traderx.watchlistView",
+    "onView:traderx.watchlistView.panel",
     "onView:traderx.marketNavigator",
+    "onView:traderx.marketNavigator.panel",
     "onCommand:traderx.openMarket",
     "onCommand:traderx.market.openPage",
     "onCommand:traderx.addStock",
@@ -25,7 +27,10 @@
     "onCommand:traderx.openIntraday",
     "onCommand:traderx.openIntradayPickPlatform",
     "onCommand:traderx.openGroupManage",
-    "onCommand:traderx.openSettings"
+    "onCommand:traderx.openSettings",
+    "onCommand:traderx.openTraderxPanel",
+    "onCommand:traderx.backToEditor",
+    "onCommand:traderx.openExplorerView"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -33,6 +38,13 @@
       "activitybar": [
         {
           "id": "traderx",
+          "title": "TraderX",
+          "icon": "media/chart.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "traderx-panel",
           "title": "TraderX",
           "icon": "media/chart.svg"
         }
@@ -47,6 +59,17 @@
         },
         {
           "id": "traderx.marketNavigator",
+          "name": "市场行情"
+        }
+      ],
+      "traderx-panel": [
+        {
+          "type": "webview",
+          "id": "traderx.watchlistView.panel",
+          "name": "自选"
+        },
+        {
+          "id": "traderx.marketNavigator.panel",
           "name": "市场行情"
         }
       ]
@@ -103,6 +126,25 @@
       {
         "command": "traderx.market.openPage",
         "title": "TraderX: 打开市场行情子页"
+      },
+      {
+        "command": "traderx.openTraderxPanel",
+        "title": "TraderX: 打开底部面板视图（与终端同区，可拖动停靠）"
+      },
+      {
+        "command": "traderx.backToEditor",
+        "title": "TraderX: 回到编辑区（离开侧栏/面板）"
+      },
+      {
+        "command": "traderx.openExplorerView",
+        "title": "TraderX: 切换到资源管理器"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "traderx.backToEditor",
+        "key": "ctrl+shift+;",
+        "mac": "cmd+shift+;"
       }
     ],
     "configuration": {

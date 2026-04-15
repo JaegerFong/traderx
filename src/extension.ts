@@ -18,14 +18,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const quoteService = new QuoteService();
   const watchView = new WatchlistViewProvider(context, store, quoteService);
 
-  context.subscriptions.push(vscode.window.registerWebviewViewProvider(WatchlistViewProvider.viewId, watchView));
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(WatchlistViewProvider.viewId, watchView),
+    vscode.window.registerWebviewViewProvider(WatchlistViewProvider.viewIdPanel, watchView),
+  );
 
   const marketNav = new MarketNavigatorProvider();
-  context.subscriptions.push(vscode.window.registerTreeDataProvider(MarketNavigatorProvider.viewId, marketNav));
+  context.subscriptions.push(
+    vscode.window.createTreeView(MarketNavigatorProvider.viewId, { treeDataProvider: marketNav }),
+    vscode.window.createTreeView(MarketNavigatorProvider.viewIdPanel, { treeDataProvider: marketNav }),
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('traderx.openMarket', async () => {
       await vscode.commands.executeCommand('workbench.view.extension.traderx');
+    }),
+    vscode.commands.registerCommand('traderx.openTraderxPanel', async () => {
+      await vscode.commands.executeCommand('workbench.view.extension.traderx-panel');
+    }),
+    vscode.commands.registerCommand('traderx.backToEditor', async () => {
+      await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    }),
+    vscode.commands.registerCommand('traderx.openExplorerView', async () => {
+      await vscode.commands.executeCommand('workbench.view.explorer');
     }),
   );
 

@@ -1,7 +1,8 @@
 import type { NormalizedCode } from '../stockCode';
 import { toMarketListSymbol } from '../stockCode';
 import type { RawQuote } from '../types';
-import { fetchText } from '../http';
+import { fetchBuffer } from '../http';
+import * as iconv from 'iconv-lite';
 
 function mapKeyToNormalized(key: string): NormalizedCode | null {
   const k = key.toLowerCase();
@@ -95,9 +96,11 @@ export async function fetchTencentQuotes(codes: NormalizedCode[]): Promise<Map<s
   for (const chunk of chunks) {
     const q = chunk.map((c) => toMarketListSymbol(c)).join(',');
     const url = `https://qt.gtimg.cn/q=${q}`;
-    const text = await fetchText(url, {
+    // 腾讯接口常见为 GBK 编码，需解码避免中文名称乱码
+    const buf = await fetchBuffer(url, {
       headers: { Referer: 'https://finance.qq.com' },
     });
+    const text = iconv.decode(buf, 'gbk');
     const re = /v_(sh\d{6}|sz\d{6}|bj\d{6})="([^"]*)";/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
