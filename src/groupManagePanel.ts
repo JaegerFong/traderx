@@ -24,7 +24,7 @@ export function openGroupManagePanel(
       'traderx.groupManage',
       'TraderX 分组管理',
       vscode.ViewColumn.One,
-      { enableScripts: true, retainContextWhenHidden: true },
+      { enableScripts: true, retainContextWhenHidden: false },
     );
     groupManagePanel.onDidDispose(() => {
       groupManagePanel = undefined;
@@ -129,17 +129,62 @@ function buildGroupManageHtml(stealth: boolean): string {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
   <title>分组管理</title>
   <style>
-    body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 16px; margin: 0; }
-    h1 { font-size: 16px; margin: 0 0 12px 0; }
-    .hint { color: var(--vscode-descriptionForeground); margin-bottom: 12px; line-height: 1.5; }
-    button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px 12px; border-radius: 2px; cursor: pointer; margin-right: 8px; margin-bottom: 8px; }
-    button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--vscode-panel-border); }
-    th { color: var(--vscode-descriptionForeground); font-weight: 600; }
-    .actions button { margin: 0 6px 0 0; padding: 4px 8px; font-size: 12px; }
+    body {
+      font-family: var(--vscode-font-family);
+      font-size: 13px;
+      color: var(--vscode-foreground);
+      background:
+        radial-gradient(circle at top left, color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 10%, transparent) 0, transparent 40%),
+        linear-gradient(180deg, color-mix(in srgb, var(--vscode-editor-background) 92%, black 8%) 0%, var(--vscode-editor-background) 100%);
+      padding: 18px;
+      margin: 0;
+      line-height: 1.5;
+    }
+    h1 { font-size: 18px; margin: 0 0 10px 0; letter-spacing: .02em; }
+    .hint { color: var(--vscode-descriptionForeground); margin-bottom: 14px; line-height: 1.6; }
+    button {
+      background: color-mix(in srgb, var(--vscode-button-background) 88%, white 12%);
+      color: var(--vscode-button-foreground);
+      border: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 14%, transparent);
+      padding: 8px 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      margin-right: 8px;
+      margin-bottom: 10px;
+      transition: background .16s ease, border-color .16s ease, transform .16s ease;
+    }
+    button.secondary {
+      background: color-mix(in srgb, var(--vscode-button-secondaryBackground) 82%, white 18%);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    button:hover { border-color: color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 30%, transparent); }
+    button:active { transform: translateY(1px); }
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      background: color-mix(in srgb, var(--vscode-editor-background) 94%, white 6%);
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 72%, transparent);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08);
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border) 82%, transparent);
+    }
+    th {
+      color: var(--vscode-descriptionForeground);
+      font-weight: 700;
+      background: color-mix(in srgb, var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04)) 74%, white 6%);
+    }
+    tbody tr:hover td {
+      background: color-mix(in srgb, var(--vscode-list-hoverBackground) 78%, white 4%);
+    }
+    .actions button { margin: 0 6px 0 0; padding: 6px 10px; font-size: 12px; }
     tr.dragging { opacity: .6; }
-    td.handle { width: 26px; color: var(--vscode-descriptionForeground); cursor: grab; user-select:none; }
+    td.handle { width: 26px; color: var(--vscode-descriptionForeground); cursor: grab; user-select:none; font-size: 14px; }
     td.handle:active { cursor: grabbing; }
     ${STEALTH_OFFICE_STYLE_SNIPPET}
   </style>

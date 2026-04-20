@@ -8,7 +8,7 @@ import { fetchEastmoneyMainForceOne, mapLimit } from './providers/eastmoney';
 import { STEALTH_OFFICE_STYLE_SNIPPET } from './stealthOfficeWebview';
 import { fetchIndexQuotes } from './providers/market';
 
-export class WatchlistViewProvider implements vscode.WebviewViewProvider {
+export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewId = 'traderx.watchlistView';
   /** 底部 Panel 容器中的自选（与侧栏可同时存在，便于拖到终端区停靠） */
   public static readonly viewIdPanel = 'traderx.watchlistView.panel';
@@ -34,6 +34,15 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     for (const wv of this.webviews) {
       void wv.webview.postMessage(message);
     }
+  }
+
+  private hasVisibleWebview(): boolean {
+    for (const wv of this.webviews) {
+      if (wv.visible) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private getIndicesSnapshotSync(): {
@@ -84,12 +93,11 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.onDidDispose(() => {
       this.webviews.delete(webviewView);
-      if (this.webviews.size === 0) {
-        this.clearRefreshTimer();
-      }
+      this.applyRefreshSchedule();
     });
 
     webviewView.onDidChangeVisibility(() => {
+      this.applyRefreshSchedule();
       if (webviewView.visible) {
         void this.postRows('visible');
       }
@@ -121,11 +129,21 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
 
   private applyRefreshSchedule(): void {
     this.clearRefreshTimer();
+    if (this.webviews.size === 0 || !this.hasVisibleWebview()) {
+      return;
+    }
     const sec = vscode.workspace.getConfiguration('traderx').get<number>('refreshIntervalSeconds') ?? 3;
     const ms = Math.max(3000, Math.min(300_000, sec * 1000));
     this.refreshTimer = setInterval(() => {
       void this.postRows('timer');
     }, ms);
+  }
+
+  public dispose(): void {
+    this.clearRefreshTimer();
+    this.webviews.clear();
+    this.rowCache.clear();
+    this.indicesCache = { updatedAt: 0, rows: [] };
   }
 
   public async refresh(reason = 'external'): Promise<void> {
@@ -169,6 +187,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
             }
             return this.buildSkeletonRows([c], positions)[0]!;
           });
+
+    this.pruneRowCache(codes);
 
     const idx = this.getIndicesSnapshotSync();
     this.postMessageAll({
@@ -219,6 +239,12 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     if (reason === 'timer' && !isCnAshareAutoRefreshWindow()) {
       return;
     }
+    if (this.webviews.size === 0) {
+      return;
+    }
+    if (reason === 'timer' && !this.hasVisibleWebview()) {
+      return;
+    }
     const my = ++this.seq;
     const codes = this.store.getCodesForActiveGroup();
     const positions = this.store.getPositions();
@@ -267,6 +293,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     }
 
     if (codes.length === 0) {
+      this.pruneRowCache([]);
       push({ rows: [], quotesLoading: false, reasonSuffix: '' });
       return;
     }
@@ -304,6 +331,15 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
 
     // 主力净流入后台并发补齐：每拿到一只就 patch 该行
     void this.enrichMainForceStreaming(codes, basic, my);
+  }
+
+  private pruneRowCache(activeCodes: readonly NormalizedCode[]): void {
+    const keep = new Set(activeCodes);
+    for (const code of this.rowCache.keys()) {
+      if (!keep.has(code)) {
+        this.rowCache.delete(code);
+      }
+    }
   }
 
   private async enrichMainForceStreaming(codes: NormalizedCode[], baseRows: QuoteRow[], seqToken: number): Promise<void> {
@@ -947,6 +983,208 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     .idx-item .pct { margin-left: 4px; }
 
   </style>
+  <style>
+    body {
+      padding: 12px;
+      line-height: 1.45;
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--vscode-editor-background) 97%, black 3%) 0%, var(--vscode-editor-background) 100%);
+    }
+    .traderx-stealth-inner {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .watchlist-body {
+      margin-top: 10px;
+    }
+    .bar-row {
+      gap: 6px;
+      margin-bottom: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 76%, transparent);
+    }
+    .meta-line {
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      padding: 2px 0 8px;
+      border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 62%, transparent);
+    }
+    .toolbar-label {
+      flex-shrink: 0;
+      color: color-mix(in srgb, var(--vscode-descriptionForeground) 90%, var(--vscode-foreground) 10%);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .bar-row > label.meta {
+      flex-shrink: 0;
+      color: color-mix(in srgb, var(--vscode-descriptionForeground) 90%, var(--vscode-foreground) 10%);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .meta-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 0;
+      background: color-mix(in srgb, var(--vscode-editor-background) 82%, white 18%);
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 82%, transparent);
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .meta-line::after {
+      content: "LIVE";
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 0;
+      background: transparent;
+      border: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 35%, transparent);
+      color: color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 70%, var(--vscode-foreground) 30%);
+      font-size: 11px;
+      white-space: nowrap;
+      letter-spacing: .08em;
+    }
+    select#groupSelect {
+      padding: 7px 8px;
+      border-radius: 0;
+      border-color: color-mix(in srgb, var(--vscode-dropdown-border) 68%, transparent);
+      background: color-mix(in srgb, var(--vscode-dropdown-background) 96%, black 4%);
+    }
+    button {
+      border-radius: 0;
+      padding: 7px 10px;
+      transition: background .16s ease, border-color .16s ease, color .16s ease;
+    }
+    button:hover {
+      border-color: color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 30%, transparent);
+    }
+    button:active {
+      background: color-mix(in srgb, var(--vscode-button-background) 82%, black 18%);
+    }
+    button.icon-btn {
+      width: 30px;
+      height: 30px;
+      border-radius: 0;
+    }
+    .table-wrap {
+      border-radius: 0;
+      border-color: color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 72%, transparent);
+      background: color-mix(in srgb, var(--vscode-editor-background) 98%, white 2%);
+      box-shadow: none;
+    }
+    thead th {
+      padding: 10px;
+      background: color-mix(in srgb, var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04)) 82%, black 2%);
+      border-bottom-color: color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 92%, transparent);
+    }
+    tbody td {
+      padding: 9px 10px;
+      border-bottom-color: color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 82%, transparent);
+      transition: background .16s ease;
+    }
+    tbody tr.data-row:hover td {
+      background: color-mix(in srgb, var(--vscode-list-hoverBackground) 88%, var(--vscode-editor-background) 12%);
+    }
+    .actions button {
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border-radius: 0;
+      background: transparent;
+      border-color: transparent;
+      color: var(--vscode-descriptionForeground);
+    }
+    .actions button:hover {
+      background: color-mix(in srgb, var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04)) 70%, white 8%);
+      color: var(--vscode-foreground);
+    }
+    .empty {
+      padding: 24px 14px;
+      text-align: center;
+      border: 1px dashed color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 80%, transparent);
+      border-radius: 0;
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--vscode-editor-background) 96%, white 4%) 0%, color-mix(in srgb, var(--vscode-editor-background) 99%, black 1%) 100%);
+    }
+    details.reserve {
+      margin-top: 0;
+      padding: 10px 12px 12px;
+      border-radius: 0;
+      border-color: color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 72%, transparent);
+      background: linear-gradient(180deg, color-mix(in srgb, var(--vscode-editor-background) 97%, white 3%) 0%, color-mix(in srgb, var(--vscode-editor-background) 99%, black 1%) 100%);
+      box-shadow: none;
+    }
+    details.reserve summary {
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      list-style: none;
+      padding-bottom: 8px;
+      border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 78%, transparent);
+    }
+    details.reserve summary::-webkit-details-marker {
+      display: none;
+    }
+    .indices-line {
+      gap: 6px;
+      margin: 0 0 10px 0;
+    }
+    .idx-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 7px;
+      border-radius: 0;
+      background: color-mix(in srgb, var(--vscode-editor-background) 94%, white 6%);
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,.35)) 78%, transparent);
+    }
+    .more-actions {
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .more-actions button {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-radius: 0;
+    }
+    .more-actions button::after {
+      content: "›";
+      color: var(--vscode-descriptionForeground);
+      font-size: 14px;
+    }
+    .more-actions button::after {
+      content: ">";
+    }
+    .action-hint {
+      margin: 10px 0 0 0;
+      line-height: 1.6;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      padding: 8px 10px;
+      border-radius: 0;
+      background: color-mix(in srgb, var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04)) 82%, black 2%);
+      border-left: 2px solid color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 35%, transparent);
+    }
+    details.reserve > p {
+      margin: 10px 0 0 0 !important;
+      line-height: 1.6 !important;
+      color: var(--vscode-descriptionForeground) !important;
+      font-size: 11px !important;
+      padding: 8px 10px;
+      border-radius: 0;
+      background: color-mix(in srgb, var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04)) 82%, black 2%);
+      border-left: 2px solid color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 35%, transparent);
+    }
+  </style>
 </head>
 <body>
   <div class="traderx-stealth-scrim" aria-hidden="true"></div>
@@ -1023,6 +1261,9 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
     let sortDir = 1;
     let userSorted = false;
     let skipSortOnce = true;
+    let lastIndicesSig = '';
+    let lastGroupSig = '';
+    let lastMetaText = '';
 
     function getColEls() {
       const cg = document.getElementById('cols');
@@ -1120,6 +1361,9 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
 
     function fillGroupSelect() {
       const sel = document.getElementById('groupSelect');
+      const sig = groups.map((g) => g.id + ':' + g.name + ':' + g.count).join('|') + '::' + activeGroupId;
+      if (sig === lastGroupSig) return;
+      lastGroupSig = sig;
       sel.innerHTML = '';
       for (const g of groups) {
         const o = document.createElement('option');
@@ -1152,10 +1396,17 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       const el = document.getElementById('indicesLine');
       if (!el) return;
       if (!Array.isArray(indices) || indices.length === 0) {
+        lastIndicesSig = '';
         el.style.display = 'none';
         el.textContent = '';
         return;
       }
+      const sig = indices.map((it) => [it.name || '', fmtNum(it.price, 2), fmtNum(it.changePct, 2)].join(':')).join('|');
+      if (sig === lastIndicesSig) {
+        el.style.display = 'flex';
+        return;
+      }
+      lastIndicesSig = sig;
       el.style.display = 'flex';
       el.replaceChildren();
       for (const it of indices) {
@@ -1283,6 +1534,13 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
         if (t && t.closest && t.closest('button')) return;
         vscode.postMessage({ type: 'openIntraday', code: code });
       });
+      tr.addEventListener('mouseenter', () => {
+        if (!tr._txTooltipDirty && tr.title) return;
+        const row = tr._txRow;
+        if (!row) return;
+        tr.title = rowTooltipText(row);
+        tr._txTooltipDirty = false;
+      });
     }
 
     function buildActionTd(r) {
@@ -1351,7 +1609,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
       tds[1].className = 'right';
       tds[2].textContent = fmtNum(r.changePct, 2);
       tds[2].className = 'right ' + pctCls;
-      tr.title = rowTooltipText(r);
+      tr._txRow = r;
+      tr._txTooltipDirty = true;
     }
 
     function createRow(r) {
@@ -1392,8 +1651,6 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider {
           let tr = pool.get(r.code);
           if (tr) {
             fillDataCells(tr, r);
-            const oldAct = tr.querySelector('td.actions');
-            if (oldAct) oldAct.replaceWith(buildActionTd(r));
           } else {
             tr = createRow(r);
           }

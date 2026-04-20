@@ -17,6 +17,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const quoteService = new QuoteService();
   const watchView = new WatchlistViewProvider(context, store, quoteService);
+  context.subscriptions.push(watchView);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(WatchlistViewProvider.viewId, watchView),
@@ -274,4 +275,3 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {}
-

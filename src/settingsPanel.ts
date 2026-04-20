@@ -26,7 +26,7 @@ export function openTraderxSettingsPanel(onSaved: () => void): void {
       'traderx.settings',
       'TraderX 全局设置',
       vscode.ViewColumn.One,
-      { enableScripts: true, retainContextWhenHidden: true },
+      { enableScripts: true, retainContextWhenHidden: false },
     );
     settingsPanel.onDidDispose(() => {
       settingsPanel = undefined;
@@ -119,18 +119,82 @@ function buildSettingsHtml(
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
   <title>全局设置</title>
   <style>
-    body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 16px; margin: 0; max-width: 480px; }
-    h1 { font-size: 16px; margin: 0 0 12px 0; }
-    label { display: block; margin: 12px 0 6px; color: var(--vscode-descriptionForeground); }
-    input[type="number"], select { width: 100%; box-sizing: border-box; padding: 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 2px; }
-    .row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-    button { margin-top: 16px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 8px 16px; border-radius: 2px; cursor: pointer; }
-    .hint { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 6px; }
+    body {
+      font-family: var(--vscode-font-family);
+      font-size: 13px;
+      color: var(--vscode-foreground);
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--vscode-editor-background) 96%, black 4%) 0%, var(--vscode-editor-background) 100%);
+      padding: 18px;
+      margin: 0;
+    }
+    h1 {
+      font-size: 18px;
+      margin: 0 0 14px 0;
+      letter-spacing: .02em;
+    }
+    .traderx-settings-card {
+      max-width: 560px;
+      padding: 18px;
+      border-radius: 0;
+      background: linear-gradient(180deg, color-mix(in srgb, var(--vscode-editor-background) 97%, white 3%) 0%, color-mix(in srgb, var(--vscode-editor-background) 99%, black 1%) 100%);
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 72%, transparent);
+      box-shadow: none;
+    }
+    label {
+      display: block;
+      margin: 14px 0 6px;
+      color: var(--vscode-descriptionForeground);
+      font-weight: 600;
+    }
+    input[type="number"], select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      background: color-mix(in srgb, var(--vscode-input-background) 90%, white 10%);
+      color: var(--vscode-input-foreground);
+      border: 1px solid color-mix(in srgb, var(--vscode-input-border) 70%, transparent);
+      border-radius: 0;
+      outline: none;
+    }
+    input[type="number"]:focus, select:focus {
+      border-color: color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 40%, transparent);
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 0;
+      background: color-mix(in srgb, var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04)) 82%, black 2%);
+      border-left: 2px solid color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 32%, transparent);
+    }
+    button {
+      margin-top: 18px;
+      background: color-mix(in srgb, var(--vscode-button-background) 88%, white 12%);
+      color: var(--vscode-button-foreground);
+      border: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 14%, transparent);
+      padding: 9px 18px;
+      border-radius: 0;
+      cursor: pointer;
+      transition: background .16s ease, border-color .16s ease;
+    }
+    button:hover { border-color: color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 30%, transparent); }
+    button:active { background: color-mix(in srgb, var(--vscode-button-background) 82%, black 18%); }
+    .hint {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      margin-top: 6px;
+      line-height: 1.6;
+      padding-left: 10px;
+      border-left: 2px solid color-mix(in srgb, var(--vscode-panel-border) 55%, transparent);
+    }
     ${STEALTH_OFFICE_STYLE_SNIPPET}
   </style>
 </head>
 <body${stealthOfficeBodyAttrs(stealth)}>
-  ${stealthOfficeContentWrap(stealth, settingsMain)}
+  ${stealthOfficeContentWrap(stealth, `<div class="traderx-settings-card">${settingsMain}</div>`)}
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     function syncStealth() {

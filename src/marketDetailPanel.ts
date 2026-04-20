@@ -35,7 +35,8 @@ function panelTitle(payload: MarketOpenPayload): string {
   }
 }
 
-const marketPanels = new Map<string, { panel: vscode.WebviewPanel; payload: MarketOpenPayload }>();
+const marketPanels = new Map<string, { panel: vscode.WebviewPanel; payload: MarketOpenPayload; lastActiveAt: number }>();
+const MAX_RETAINED_MARKET_PANELS = 3;
 
 export function openMarketPage(context: vscode.ExtensionContext, payload: MarketOpenPayload): void {
   if (payload.kind === 'indexKline') {
@@ -54,18 +55,29 @@ export function openMarketPage(context: vscode.ExtensionContext, payload: Market
   const existing = marketPanels.get(key);
   if (existing) {
     existing.payload = payload;
+    existing.lastActiveAt = Date.now();
     existing.panel.title = panelTitle(payload);
     existing.panel.reveal(vscode.ViewColumn.One);
   } else {
+    disposeStaleHiddenMarketPanels();
     const panel = vscode.window.createWebviewPanel(
       'traderx.marketDetail',
       panelTitle(payload),
       vscode.ViewColumn.One,
-      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [context.extensionUri] },
+      { enableScripts: true, retainContextWhenHidden: false, localResourceRoots: [context.extensionUri] },
     );
-    marketPanels.set(key, { panel, payload });
+    marketPanels.set(key, { panel, payload, lastActiveAt: Date.now() });
     panel.onDidDispose(() => {
       marketPanels.delete(key);
+    });
+    panel.onDidChangeViewState((e) => {
+      const rec = marketPanels.get(key);
+      if (!rec) {
+        return;
+      }
+      if (e.webviewPanel.visible || e.webviewPanel.active) {
+        rec.lastActiveAt = Date.now();
+      }
     });
     panel.webview.onDidReceiveMessage((m) => {
       const rec = marketPanels.get(key);
@@ -79,6 +91,22 @@ export function openMarketPage(context: vscode.ExtensionContext, payload: Market
   const rec = marketPanels.get(key)!;
   const nonce = String(Math.random()).slice(2);
   rec.panel.webview.html = buildHtml(rec.panel.webview, nonce, payload);
+}
+
+function disposeStaleHiddenMarketPanels(): void {
+  if (marketPanels.size < MAX_RETAINED_MARKET_PANELS) {
+    return;
+  }
+  const hidden = Array.from(marketPanels.entries())
+    .filter(([, rec]) => !rec.panel.visible && !rec.panel.active)
+    .sort((a, b) => a[1].lastActiveAt - b[1].lastActiveAt);
+  while (marketPanels.size >= MAX_RETAINED_MARKET_PANELS && hidden.length > 0) {
+    const victim = hidden.shift();
+    if (!victim) {
+      break;
+    }
+    victim[1].panel.dispose();
+  }
 }
 
 async function pushMarketMessage(
@@ -169,22 +197,87 @@ function buildHtml(webview: vscode.Webview, nonce: string, payload: MarketOpenPa
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${escapeHtml(panelTitle(payload))}</title>
   <style>
-    body { margin: 0; padding: 10px; color: var(--vscode-foreground); background: var(--vscode-editor-background);
-      font-family: var(--vscode-font-family); font-size: 12px; }
-    .err { color: var(--vscode-errorForeground); margin: 8px 0; }
-    .muted { color: var(--vscode-descriptionForeground); font-size: 11px; margin-bottom: 8px; }
-    table { border-collapse: collapse; width: 100%; font-size: 11px; }
-    th, td { border: 1px solid var(--vscode-panel-border); padding: 4px 5px; text-align: left; vertical-align: top; }
-    th { background: var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04)); white-space: nowrap; }
+    body {
+      margin: 0;
+      padding: 12px;
+      color: var(--vscode-foreground);
+      background:
+        radial-gradient(circle at top left, color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 10%, transparent) 0, transparent 40%),
+        linear-gradient(180deg, color-mix(in srgb, var(--vscode-editor-background) 92%, black 8%) 0%, var(--vscode-editor-background) 100%);
+      font-family: var(--vscode-font-family);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .err {
+      color: var(--vscode-errorForeground);
+      margin: 8px 0;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--vscode-inputValidation-errorBackground, #4f1f1f) 42%, transparent);
+      border: 1px solid color-mix(in srgb, var(--vscode-errorForeground) 24%, transparent);
+    }
+    .muted {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      margin-bottom: 10px;
+      line-height: 1.6;
+    }
+    table {
+      border-collapse: separate;
+      border-spacing: 0;
+      width: 100%;
+      font-size: 11px;
+      background: color-mix(in srgb, var(--vscode-editor-background) 95%, white 5%);
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 72%, transparent);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08);
+    }
+    th, td {
+      border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border) 82%, transparent);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: color-mix(in srgb, var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04)) 74%, white 6%);
+      white-space: nowrap;
+      font-weight: 700;
+    }
+    tbody tr:hover td {
+      background: color-mix(in srgb, var(--vscode-list-hoverBackground) 78%, white 4%);
+    }
     td.num { text-align: right; font-variant-numeric: tabular-nums; }
-    .wrap { overflow-x: auto; }
-    .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
-    button { background: var(--vscode-button-background); color: var(--vscode-button-foreground);
-      border: none; border-radius: 2px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
-    button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
-    input { padding: 4px 6px; background: var(--vscode-input-background); color: var(--vscode-input-foreground);
-      border: 1px solid var(--vscode-input-border); border-radius: 2px; }
-    .region-title { margin: 10px 0 4px; font-weight: 600; color: var(--vscode-descriptionForeground); font-size: 11px; }
+    .wrap { overflow-x: auto; margin-bottom: 10px; }
+    .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+    button {
+      background: color-mix(in srgb, var(--vscode-button-background) 88%, white 12%);
+      color: var(--vscode-button-foreground);
+      border: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 14%, transparent);
+      border-radius: 10px;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background .16s ease, border-color .16s ease, transform .16s ease;
+    }
+    button.secondary { background: color-mix(in srgb, var(--vscode-button-secondaryBackground) 82%, white 18%); color: var(--vscode-button-secondaryForeground); }
+    button:hover { border-color: color-mix(in srgb, var(--vscode-focusBorder, #4c8dff) 30%, transparent); }
+    button:active { transform: translateY(1px); }
+    input {
+      padding: 8px 10px;
+      background: color-mix(in srgb, var(--vscode-input-background) 90%, white 10%);
+      color: var(--vscode-input-foreground);
+      border: 1px solid color-mix(in srgb, var(--vscode-input-border) 70%, transparent);
+      border-radius: 10px;
+    }
+    .region-title {
+      margin: 12px 0 6px;
+      font-weight: 700;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
     ${STEALTH_OFFICE_STYLE_SNIPPET}
   </style>
 </head>

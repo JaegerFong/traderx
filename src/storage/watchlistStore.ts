@@ -21,7 +21,7 @@ export interface GroupSortState {
 const DEFAULT_SORT: GroupSortState = { key: 'name', dir: 1 };
 
 /** 表头已移除的列，历史排序需回退 */
-const LEGACY_SORT_KEYS = new Set(['code', 'high', 'low', 'amountYuan']);
+const LEGACY_SORT_KEYS = new Set(['code', 'high', 'low', 'amountYuan', 'dividendYieldTtmPct']);
 
 function normalizeSortKey(key: string): string {
   return LEGACY_SORT_KEYS.has(key) ? 'name' : key;
@@ -72,7 +72,10 @@ export class WatchlistStore {
   private readonly readyPromise: Promise<void>;
 
   constructor(private readonly ctx: vscode.ExtensionContext) {
-    this.readyPromise = this.migrateFromLegacy();
+    this.readyPromise = (async () => {
+      await this.migrateFromLegacy();
+      await this.removeIncomeGroupIfPresent();
+    })();
   }
 
   /** 须在扩展激活时 await，确保完成从旧版扁平列表的迁移 */
@@ -90,6 +93,31 @@ export class WatchlistStore {
     await this.ctx.globalState.update(KEY_GROUPS, groups);
     await this.ctx.globalState.update(KEY_ACTIVE, DEFAULT_GROUP_ID);
     await this.ctx.globalState.update(KEY_LIST_LEGACY, undefined);
+  }
+
+  /** 移除已废弃的固定分组 id=income，并将其股票合并到「自选」 */
+  private async removeIncomeGroupIfPresent(): Promise<void> {
+    const groups = this.ctx.globalState.get<WatchlistGroup[]>(KEY_GROUPS, []);
+    const idx = groups.findIndex((g) => g.id === 'income');
+    if (idx < 0) {
+      return;
+    }
+    const victim = groups[idx]!;
+    const def = groups.find((g) => g.id === DEFAULT_GROUP_ID);
+    if (def) {
+      def.codes = dedupeCodes([...def.codes, ...victim.codes]);
+    }
+    groups.splice(idx, 1);
+    await this.ctx.globalState.update(KEY_GROUPS, groups);
+    const active = this.ctx.globalState.get<string | undefined>(KEY_ACTIVE);
+    if (active === 'income') {
+      await this.ctx.globalState.update(KEY_ACTIVE, DEFAULT_GROUP_ID);
+    }
+    const sortAll = { ...this.ctx.globalState.get<Record<string, GroupSortState>>(KEY_SORT_BY_GROUP, {}) };
+    if (sortAll.income) {
+      delete sortAll.income;
+      await this.ctx.globalState.update(KEY_SORT_BY_GROUP, sortAll);
+    }
   }
 
   getGroups(): WatchlistGroup[] {
