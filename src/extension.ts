@@ -5,11 +5,15 @@ import { openIntradayPanel, openIntradayQuotePage } from './intradayPanel';
 import type { IntradayPageProvider } from './stockUrls';
 import type { NormalizedCode } from './stockCode';
 import { QuoteService } from './services/quoteService';
+import { DividendService } from './services/dividendService';
 import { openTraderxSettingsPanel } from './settingsPanel';
 import { DEFAULT_GROUP_ID, WatchlistStore } from './storage/watchlistStore';
+import { DividendStore } from './storage/dividendStore';
 import { openMarketPage } from './marketDetailPanel';
 import { MarketNavigatorProvider, type MarketOpenPayload } from './marketNavigatorTree';
 import { WatchlistViewProvider } from './watchlistView';
+import { DividendViewProvider } from './dividendView';
+import { openDividendDetailPanel } from './dividendDetailPanel';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const store = new WatchlistStore(context);
@@ -28,6 +32,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.window.createTreeView(MarketNavigatorProvider.viewId, { treeDataProvider: marketNav }),
     vscode.window.createTreeView(MarketNavigatorProvider.viewIdPanel, { treeDataProvider: marketNav }),
+  );
+
+  const dividendStore = new DividendStore(context);
+  const dividendService = new DividendService(dividendStore, store);
+  const dividendView = new DividendViewProvider(context, dividendStore, dividendService);
+  context.subscriptions.push(dividendView);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(DividendViewProvider.viewId, dividendView),
+    vscode.window.registerWebviewViewProvider(DividendViewProvider.viewIdPanel, dividendView),
   );
 
   context.subscriptions.push(
@@ -105,8 +118,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           return;
         }
         code = picked;
-      } else if (!store.hasCodeInAnyGroup(code)) {
-        vscode.window.showWarningMessage('该代码不在任何自选分组中');
+      } else if (!store.hasCodeInAnyGroup(code) && !dividendStore.has(code as NormalizedCode)) {
+        vscode.window.showWarningMessage('该代码不在自选或股息关注名单中');
         return;
       }
 
@@ -142,7 +155,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
       await store.setPosition(code!, { cost, shares });
       vscode.window.showInformationMessage(`已保存持仓：${code}`);
-      await watchView.editPositionIncremental(code!);
+      // 仅在该代码确实存在于自选时才增量刷新自选行，避免把仅在股息关注的代码错误加入到当前分组
+      if (store.hasCodeInAnyGroup(code!)) {
+        await watchView.editPositionIncremental(code!);
+      }
+      if (dividendStore.has(code as NormalizedCode)) {
+        dividendView.refreshEstimateOnly(code as NormalizedCode);
+      }
     }),
   );
 
@@ -270,6 +289,87 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('traderx.openSettings', () => {
       // 保存设置后先轻量同步 UI，避免立即全量拉行情造成等待
       openTraderxSettingsPanel(() => watchView.refreshUiOnly('settingsSaved'));
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.dividend.addStock', async () => {
+      const picked = await pickStockWithSearch();
+      if (!picked) {
+        return;
+      }
+      const r = await dividendStore.addCode(picked);
+      if (r === 'exists') {
+        vscode.window.showInformationMessage(`已在股息关注：${picked}`);
+        return;
+      }
+      vscode.window.showInformationMessage(`已添加到股息关注：${picked}`);
+      await dividendView.addOneIncremental(picked);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.dividend.removeStock', async (codeArg?: NormalizedCode) => {
+      let code = codeArg;
+      if (!code) {
+        const codes = dividendStore.getCodes();
+        if (codes.length === 0) {
+          vscode.window.showInformationMessage('股息关注名单为空');
+          return;
+        }
+        const picked = await vscode.window.showQuickPick(codes, { placeHolder: '从股息关注移除' });
+        if (!picked) {
+          return;
+        }
+        code = picked as NormalizedCode;
+      }
+      await dividendStore.removeCode(code);
+      await dividendView.removeOneIncremental(code);
+      vscode.window.showInformationMessage(`已移除：${code}`);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.dividend.refresh', async () => {
+      await dividendView.refresh(true, 'command');
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.dividend.openDetail', async (codeArg?: NormalizedCode) => {
+      let code = codeArg;
+      if (!code) {
+        const codes = dividendStore.getCodes();
+        if (codes.length === 0) {
+          vscode.window.showInformationMessage('股息关注名单为空，先添加再查看详情');
+          return;
+        }
+        const picked = await vscode.window.showQuickPick(codes, { placeHolder: '选择股票查看股息详情' });
+        if (!picked) {
+          return;
+        }
+        code = picked as NormalizedCode;
+      }
+      openDividendDetailPanel(context, dividendService, code);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.dividend.editHolding', async (codeArg?: NormalizedCode) => {
+      let code = codeArg;
+      if (!code) {
+        const codes = dividendStore.getCodes();
+        if (codes.length === 0) {
+          vscode.window.showInformationMessage('股息关注名单为空');
+          return;
+        }
+        const picked = await vscode.window.showQuickPick(codes, { placeHolder: '编辑持仓股数（用于估算）' });
+        if (!picked) {
+          return;
+        }
+        code = picked as NormalizedCode;
+      }
+      await vscode.commands.executeCommand('traderx.editPosition', code);
     }),
   );
 }

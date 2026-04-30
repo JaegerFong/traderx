@@ -41,7 +41,7 @@ export async function fetchTrendsTencent(code: NormalizedCode): Promise<TrendsRe
     }
   }
 
-  const points: { timeLabel: string; price: number }[] = [];
+  const points: { timeLabel: string; price: number; avgPrice?: number; volume?: number; amountYuan?: number }[] = [];
   for (const line of block.data.data) {
     const parts = line.trim().split(/\s+/);
     if (parts.length < 2) {

@@ -95,6 +95,89 @@ export interface ConceptItem {
   name: string;
 }
 
+/** 单次分红事件（已规范化） */
+export interface DividendEvent {
+  /** 来源原始记录 id（用于去重，缺失则由调用方生成） */
+  id?: string;
+  code: string;
+  /** 报告期（如 2024-12-31），用于派息预案的归属，可选 */
+  reportDate?: string;
+  /** 公告日 */
+  announceDate?: string;
+  /** 股权登记日 */
+  recordDate?: string;
+  /** 除权除息日 */
+  exDate?: string;
+  /** 派息日 */
+  payDate?: string;
+  /** 每股现金分红（元/股，税前） */
+  cashPerShare?: number;
+  /** 每10股现金分红（元/10股，税前） */
+  cashPer10Shares?: number;
+  /** 每10股送红股 */
+  bonusPer10Shares?: number;
+  /** 每10股转增 */
+  transferPer10Shares?: number;
+  /** 实施状态 */
+  status: 'implemented' | 'plan' | 'unknown';
+  /** 数据来源 id（如 'eastmoney'） */
+  source: string;
+}
+
+/** 年度归属口径 */
+export type DividendYearAttribution = 'payYear' | 'recordYear' | 'announceYear';
+
+/** 单年汇总 */
+export interface DividendYearlySummary {
+  year: number;
+  /** 已实施合计：每股累计现金分红（元/股，税前） */
+  cashPerShare: number;
+  /** 该年内事件数 */
+  count: number;
+  /** 是否使用了降级口径（缺失指定字段时回退） */
+  fallback: boolean;
+}
+
+/** 关注列表行（送给 UI 渲染） */
+export interface DividendRow {
+  code: string;
+  name: string;
+  /** 近 1 年合计（元/股，税前） */
+  last1yCashPerShare: number | null;
+  /** 近 3 年合计（元/股，税前） */
+  last3yCashPerShare: number | null;
+  /** 基于持仓的年度估算（取近 1 年合计 × 持仓股数；税前/税后视配置） */
+  estAnnualYuan: number | null;
+  /** 是否税后口径（仅当 showAfterTax 启用） */
+  estAfterTax: boolean;
+  /** 下一关键日期（YYYY-MM-DD，多取 ex/record/pay 中最近未来或最新） */
+  nextEventDate: string | null;
+  /** 下一事件状态 */
+  nextEventStatus: 'implemented' | 'plan' | 'unknown' | null;
+  /** 持仓股数（用于 UI 显示） */
+  shares?: number;
+  /** 数据更新时间（毫秒） */
+  updatedAt: number | null;
+  /** 行级错误（数据缺失/拉取失败） */
+  error?: string;
+}
+
+/** 缓存条目：按股票 */
+export interface DividendCacheEntry {
+  code: string;
+  name?: string;
+  events: DividendEvent[];
+  fetchedAt: number;
+  /** 上一次拉取的错误（成功后清空） */
+  error?: string;
+}
+
+export interface DividendSortState {
+  key: string;
+  /** 1 升序，-1 降序 */
+  dir: 1 | -1;
+}
+
 export type MarketListKind =
   | 'topConcepts'
   | 'topIndustries'

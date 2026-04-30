@@ -2,7 +2,7 @@
   "name": "traderx",
   "displayName": "TraderX A股自选",
   "description": "A股自选行情、主力净流入与持仓盈亏（本地）",
-  "version": "0.4.12",
+  "version": "0.4.19",
   "publisher": "traderx",
   "engines": {
     "vscode": "^1.85.0"
@@ -15,6 +15,8 @@
     "onView:traderx.watchlistView.panel",
     "onView:traderx.marketNavigator",
     "onView:traderx.marketNavigator.panel",
+    "onView:traderx.dividendView",
+    "onView:traderx.dividendView.panel",
     "onCommand:traderx.openMarket",
     "onCommand:traderx.market.openPage",
     "onCommand:traderx.addStock",
@@ -30,7 +32,12 @@
     "onCommand:traderx.openSettings",
     "onCommand:traderx.openTraderxPanel",
     "onCommand:traderx.backToEditor",
-    "onCommand:traderx.openExplorerView"
+    "onCommand:traderx.openExplorerView",
+    "onCommand:traderx.dividend.addStock",
+    "onCommand:traderx.dividend.removeStock",
+    "onCommand:traderx.dividend.refresh",
+    "onCommand:traderx.dividend.openDetail",
+    "onCommand:traderx.dividend.editHolding"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -58,6 +65,11 @@
           "name": "自选"
         },
         {
+          "type": "webview",
+          "id": "traderx.dividendView",
+          "name": "股息"
+        },
+        {
           "id": "traderx.marketNavigator",
           "name": "市场行情"
         }
@@ -67,6 +79,11 @@
           "type": "webview",
           "id": "traderx.watchlistView.panel",
           "name": "自选"
+        },
+        {
+          "type": "webview",
+          "id": "traderx.dividendView.panel",
+          "name": "股息"
         },
         {
           "id": "traderx.marketNavigator.panel",
@@ -138,6 +155,26 @@
       {
         "command": "traderx.openExplorerView",
         "title": "TraderX: 切换到资源管理器"
+      },
+      {
+        "command": "traderx.dividend.addStock",
+        "title": "TraderX: 添加股息关注"
+      },
+      {
+        "command": "traderx.dividend.removeStock",
+        "title": "TraderX: 从股息关注移除"
+      },
+      {
+        "command": "traderx.dividend.refresh",
+        "title": "TraderX: 刷新股息数据"
+      },
+      {
+        "command": "traderx.dividend.openDetail",
+        "title": "TraderX: 查看股息详情"
+      },
+      {
+        "command": "traderx.dividend.editHolding",
+        "title": "TraderX: 编辑股息估算用持仓"
       }
     ],
     "keybindings": [
@@ -189,11 +226,12 @@
         "traderx.intradayDisplayMode": {
           "type": "string",
           "enum": [
+            "webviewCanvas",
             "simpleBrowser",
             "systemBrowser"
           ],
-          "default": "simpleBrowser",
-          "description": "分时查看方式（未开启低调办公时）：内置 Simple Browser 或系统浏览器；历史 webviewCanvas 已废弃并按 simpleBrowser 处理"
+          "default": "webviewCanvas",
+          "description": "分时查看方式：本地 Webview Canvas（跟随 VSCode 暗黑主题）、内置 Simple Browser 或系统浏览器"
         },
         "traderx.intradayPageProvider": {
           "type": "string",
@@ -210,6 +248,48 @@
           "minimum": 5000,
           "maximum": 120000,
           "description": "市场行情（全球股指/行业排行/资金流向）请求超时（毫秒）"
+        },
+        "traderx.dividend.refreshIntervalHours": {
+          "type": "number",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 168,
+          "description": "股息数据缓存有效期（小时）；超过则后台懒刷新，手动刷新可强制忽略缓存"
+        },
+        "traderx.dividend.yearAttribution": {
+          "type": "string",
+          "enum": [
+            "payYear",
+            "recordYear",
+            "announceYear"
+          ],
+          "default": "payYear",
+          "description": "股息年度归属口径：派息年 / 登记年 / 公告年（缺失时自动降级并标注）"
+        },
+        "traderx.dividend.showAfterTax": {
+          "type": "boolean",
+          "default": false,
+          "description": "估算时显示税后近似值（非精确口径，仅作参考）"
+        },
+        "traderx.dividend.taxRate": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 0.45,
+          "description": "税后估算所用税率（仅当 showAfterTax 为 true 时生效）"
+        },
+        "traderx.dividend.providerOrder": {
+          "type": "array",
+          "default": [
+            "eastmoney"
+          ],
+          "items": {
+            "type": "string",
+            "enum": [
+              "eastmoney"
+            ]
+          },
+          "description": "股息数据源优先级（预留多源扩展，当前仅 eastmoney）"
         }
       }
     }
@@ -217,7 +297,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "release:vsix": "bash ./scripts/release-vsix.sh"
   },
   "dependencies": {
     "iconv-lite": "^0.6.3"
