@@ -16,6 +16,10 @@ export function normalizeIntradayDisplayMode(raw: string | undefined): IntradayD
 
 const intradayPanels = new Map<NormalizedCode, vscode.WebviewPanel>();
 
+function getActiveViewColumn(): vscode.ViewColumn {
+  return vscode.window.activeTextEditor?.viewColumn ?? vscode.window.tabGroups.activeTabGroup.viewColumn ?? vscode.ViewColumn.One;
+}
+
 function normalizePageProvider(cfg: vscode.WorkspaceConfiguration): IntradayPageProvider {
   const raw = cfg.get<string>('intradayPageProvider') ?? 'eastmoney_full';
   if (raw === 'eastmoney_discreet') {
@@ -66,11 +70,11 @@ async function openQuotePageInSimpleBrowserOrExternal(url: string): Promise<void
 function openLeekFundStyleIntradayPanel(code: NormalizedCode): void {
   const existing = intradayPanels.get(code);
   if (existing) {
-    existing.reveal(vscode.ViewColumn.One);
+    existing.reveal(getActiveViewColumn());
     return;
   }
 
-  const panel = vscode.window.createWebviewPanel('traderx.intradayEastmoney', `股票实时走势(${code})`, vscode.ViewColumn.One, {
+  const panel = vscode.window.createWebviewPanel('traderx.intradayEastmoney', `股票实时走势(${code})`, getActiveViewColumn(), {
     enableScripts: true,
     retainContextWhenHidden: true,
   });

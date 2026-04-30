@@ -2,7 +2,7 @@
   "name": "traderx",
   "displayName": "TraderX A股自选",
   "description": "A股自选行情、主力净流入与持仓盈亏（本地）",
-  "version": "0.4.19",
+  "version": "0.4.20",
   "publisher": "traderx",
   "engines": {
     "vscode": "^1.85.0"
