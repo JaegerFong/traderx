@@ -14,6 +14,10 @@ import { MarketNavigatorProvider, type MarketOpenPayload } from './marketNavigat
 import { WatchlistViewProvider } from './watchlistView';
 import { DividendViewProvider } from './dividendView';
 import { openDividendDetailPanel } from './dividendDetailPanel';
+import { openAiStockPanel } from './aiStockPanel';
+import { AiCandidateProvider } from './ai/candidateProvider';
+import { clearAiApiKey, readAiRuntimeConfig, saveAiApiKey } from './ai/config';
+import { AiStockAgentService } from './ai/stockAgentService';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const store = new WatchlistStore(context);
@@ -282,6 +286,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('traderx.openGroupManage', () => {
       openGroupManagePanel(store, refreshWatch);
+    }),
+  );
+
+  const openAiPanel = (): void => {
+    openAiStockPanel({
+      context,
+      store,
+      quoteService,
+      onAdded: async (code) => {
+        await watchView.addStockIncremental(code);
+      },
+    });
+  };
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('traderx.openAiStockPicker', () => {
+      openAiPanel();
+    }),
+    vscode.commands.registerCommand('traderx.ai.setApiKey', async () => {
+      const cfg = await readAiRuntimeConfig(context);
+      const value = await vscode.window.showInputBox({
+        title: `配置 ${cfg.providerLabel} API Key`,
+        prompt: 'API Key 只保存在 VS Code SecretStorage，不会写入 settings.json',
+        password: true,
+        ignoreFocusOut: true,
+      });
+      if (value === undefined) {
+        return;
+      }
+      await saveAiApiKey(context, cfg.provider, value);
+      vscode.window.showInformationMessage(`已保存 ${cfg.providerLabel} API Key`);
+    }),
+    vscode.commands.registerCommand('traderx.ai.clearApiKey', async () => {
+      const cfg = await readAiRuntimeConfig(context);
+      await clearAiApiKey(context, cfg.provider);
+      vscode.window.showInformationMessage(`已清除 ${cfg.providerLabel} API Key`);
+    }),
+    vscode.commands.registerCommand('traderx.ai.testConnection', async () => {
+      const provider = new AiCandidateProvider(store, quoteService);
+      const agent = new AiStockAgentService(context, provider);
+      try {
+        vscode.window.showInformationMessage(await agent.testConnection());
+      } catch (e) {
+        vscode.window.showErrorMessage(e instanceof Error ? e.message : String(e));
+      }
     }),
   );
 

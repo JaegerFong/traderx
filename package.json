@@ -2,7 +2,7 @@
   "name": "traderx",
   "displayName": "TraderX A股自选",
   "description": "A股自选行情、主力净流入与持仓盈亏（本地）",
-  "version": "0.4.20",
+  "version": "0.5.21",
   "publisher": "traderx",
   "engines": {
     "vscode": "^1.85.0"
@@ -30,6 +30,10 @@
     "onCommand:traderx.openIntradayPickPlatform",
     "onCommand:traderx.openGroupManage",
     "onCommand:traderx.openSettings",
+    "onCommand:traderx.openAiStockPicker",
+    "onCommand:traderx.ai.setApiKey",
+    "onCommand:traderx.ai.clearApiKey",
+    "onCommand:traderx.ai.testConnection",
     "onCommand:traderx.openTraderxPanel",
     "onCommand:traderx.backToEditor",
     "onCommand:traderx.openExplorerView",
@@ -135,6 +139,22 @@
       {
         "command": "traderx.openSettings",
         "title": "TraderX: 全局设置"
+      },
+      {
+        "command": "traderx.openAiStockPicker",
+        "title": "TraderX: AI 选股"
+      },
+      {
+        "command": "traderx.ai.setApiKey",
+        "title": "TraderX: 设置 AI API Key"
+      },
+      {
+        "command": "traderx.ai.clearApiKey",
+        "title": "TraderX: 清除 AI API Key"
+      },
+      {
+        "command": "traderx.ai.testConnection",
+        "title": "TraderX: 测试 AI 模型连接"
       },
       {
         "command": "traderx.openMarket",
@@ -290,6 +310,40 @@
             ]
           },
           "description": "股息数据源优先级（预留多源扩展，当前仅 eastmoney）"
+        },
+        "traderx.ai.provider": {
+          "type": "string",
+          "enum": [
+            "openai",
+            "deepseek",
+            "custom"
+          ],
+          "default": "deepseek",
+          "description": "AI 选股模型供应商。API Key 通过命令 TraderX: 设置 AI API Key 保存到 SecretStorage"
+        },
+        "traderx.ai.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI-compatible Base URL。留空时使用供应商默认值，例如 DeepSeek 为 https://api.deepseek.com/v1"
+        },
+        "traderx.ai.model": {
+          "type": "string",
+          "default": "",
+          "description": "AI 模型名称。留空时使用供应商默认模型，例如 deepseek-chat / gpt-4o-mini"
+        },
+        "traderx.ai.timeoutMs": {
+          "type": "number",
+          "default": 45000,
+          "minimum": 5000,
+          "maximum": 180000,
+          "description": "AI 模型请求超时（毫秒）"
+        },
+        "traderx.ai.maxCandidates": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "maximum": 120,
+          "description": "AI 选股单次传给模型的最大候选股票数量"
         }
       }
     }
