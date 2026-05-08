@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { AiCandidateProvider, type AiCandidateScope } from './ai/candidateProvider';
 import { clearAiApiKey, readAiRuntimeConfig, saveAiApiKey } from './ai/config';
-import { AiStockAgentService, type AiStockPickResult } from './ai/stockAgentService';
+import { AiStockAgentService } from './ai/stockAgentService';
 import type { QuoteService } from './services/quoteService';
 import { isStealthOfficeEnabled, STEALTH_OFFICE_STYLE_SNIPPET, stealthOfficeBodyAttrs, stealthOfficeContentWrap } from './stealthOfficeWebview';
 import { normalizeStockInput, type NormalizedCode } from './stockCode';
@@ -82,7 +82,9 @@ async function handleMessage(
       return;
     }
     if (msg.type === 'run') {
-      const result = await agent.selectStocks(msg.prompt ?? '', normalizeScope(msg.scope));
+      const result = await agent.selectStocks(msg.prompt ?? '', normalizeScope(msg.scope), (step) => {
+        webview.postMessage({ type: 'progress', step });
+      });
       webview.postMessage({ type: 'result', result });
       return;
     }
@@ -201,6 +203,7 @@ function buildAiStockHtml(webview: vscode.Webview, stealth: boolean): string {
         <button class="secondary" id="addAll" disabled>全部加入当前分组</button>
       </div>
       <div id="message" class="muted">等待输入选股描述。</div>
+      <div id="steps" class="steps"></div>
       <div id="result"></div>
     </section>
   </div>`;
@@ -282,6 +285,26 @@ function buildAiStockHtml(webview: vscode.Webview, stealth: boolean): string {
     .code { font-variant-numeric: tabular-nums; font-weight: 700; }
     .tag { color: var(--vscode-descriptionForeground); font-size: 12px; }
     .reason { margin-top: 8px; }
+    .steps {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin: 12px 0;
+    }
+    .step {
+      padding: 9px 11px;
+      border-radius: 10px;
+      border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 78%, transparent);
+      background: color-mix(in srgb, var(--vscode-editor-lineHighlightBackground, rgba(255,255,255,.04)) 72%, white 4%);
+    }
+    .step-title {
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+    .step-detail {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
     ul { margin: 8px 0 0 18px; padding: 0; color: var(--vscode-descriptionForeground); }
     ${STEALTH_OFFICE_STYLE_SNIPPET}
   </style>
@@ -309,6 +332,7 @@ function buildAiStockHtml(webview: vscode.Webview, stealth: boolean): string {
       lastCodes = (result.picks || []).map((x) => x.code);
       $('addAll').disabled = lastCodes.length === 0;
       setMessage(result.summary + '（候选 ' + result.candidateCount + ' 只，模型 ' + result.providerLabel + ' / ' + result.model + '）', false);
+      renderSteps(result.steps || []);
       const root = $('result');
       root.innerHTML = '';
       if (result.warnings && result.warnings.length) {
@@ -361,19 +385,44 @@ function buildAiStockHtml(webview: vscode.Webview, stealth: boolean): string {
         root.appendChild(box);
       }
     }
+    function renderSteps(steps) {
+      const root = $('steps');
+      root.innerHTML = '';
+      for (const step of steps || []) {
+        appendStep(step);
+      }
+    }
+    function appendStep(step) {
+      const root = $('steps');
+      const box = document.createElement('div');
+      box.className = 'step';
+      const title = document.createElement('div');
+      title.className = 'step-title';
+      title.textContent = step.title || step.stage || '筛选步骤';
+      const detail = document.createElement('div');
+      detail.className = 'step-detail';
+      const time = step.at ? new Date(step.at).toLocaleTimeString() + ' · ' : '';
+      detail.textContent = time + (step.detail || '');
+      box.appendChild(title);
+      box.appendChild(detail);
+      root.appendChild(box);
+      box.scrollIntoView({ block: 'nearest' });
+    }
     $('setKey').onclick = () => vscode.postMessage({ type: 'setApiKey' });
     $('clearKey').onclick = () => vscode.postMessage({ type: 'clearApiKey' });
     $('test').onclick = () => vscode.postMessage({ type: 'testConnection' });
     $('addAll').onclick = () => vscode.postMessage({ type: 'addAll', codes: lastCodes });
     $('run').onclick = () => {
       setBusy(true);
-      setMessage('正在准备候选池并调用模型...', false);
+      setMessage('正在筛选，下面会显示每一步过程...', false);
+      $('steps').innerHTML = '';
       $('result').innerHTML = '';
       vscode.postMessage({ type: 'run', prompt: $('prompt').value, scope: $('scope').value });
     };
     window.addEventListener('message', (e) => {
       const msg = e.data || {};
       if (msg.type === 'state') renderState(msg.state);
+      if (msg.type === 'progress') appendStep(msg.step);
       if (msg.type === 'result') { setBusy(false); renderResult(msg.result); }
       if (msg.type === 'error') { setBusy(false); setMessage(msg.message || '操作失败', true); }
       if (msg.type === 'notice') setMessage(msg.message || '操作完成', false);

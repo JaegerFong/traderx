@@ -17,10 +17,20 @@ export interface AiStockPickResult {
   summary: string;
   picks: AiStockPick[];
   warnings: string[];
+  steps: AiStockAgentStep[];
   providerLabel: string;
   model: string;
   candidateCount: number;
 }
+
+export interface AiStockAgentStep {
+  stage: 'input' | 'config' | 'candidate' | 'prompt' | 'model' | 'validate' | 'done';
+  title: string;
+  detail: string;
+  at: number;
+}
+
+export type AiStockProgress = (step: AiStockAgentStep) => void;
 
 type ModelPickPayload = {
   summary?: unknown;
@@ -105,21 +115,37 @@ export class AiStockAgentService {
     private readonly candidateProvider: AiCandidateProvider,
   ) {}
 
-  async selectStocks(prompt: string, scope: AiCandidateScope): Promise<AiStockPickResult> {
+  async selectStocks(prompt: string, scope: AiCandidateScope, onProgress?: AiStockProgress): Promise<AiStockPickResult> {
+    const steps: AiStockAgentStep[] = [];
+    const progress = (stage: AiStockAgentStep['stage'], title: string, detail: string): void => {
+      const step = { stage, title, detail, at: Date.now() };
+      steps.push(step);
+      onProgress?.(step);
+    };
+
+    progress('input', '读取输入', `候选池范围：${scopeLabel(scope)}`);
     const query = prompt.trim();
     if (!query) {
       throw new Error('请输入一句选股描述');
     }
 
+    progress('config', '读取模型配置', '正在读取 provider、baseUrl、model、timeout 与本机密钥状态');
     const config = await readAiRuntimeConfig(this.ctx);
     const apiKey = await getAiApiKey(this.ctx, config.provider);
     validateAiRuntimeConfig(config, apiKey);
+    progress('config', '模型配置有效', `使用 ${config.providerLabel} / ${config.model}，超时 ${config.timeoutMs}ms`);
 
     const maxCandidates = this.getMaxCandidates();
+    progress('candidate', '构建候选股票池', `最多收集 ${maxCandidates} 只，先按候选池范围拉取并补齐行情/资金字段`);
     const candidateResult = await this.candidateProvider.build(scope, maxCandidates);
     if (candidateResult.candidates.length === 0) {
       throw new Error(candidateResult.warnings[0] ?? '没有可供筛选的候选股票');
     }
+    progress(
+      'candidate',
+      '候选池准备完成',
+      `实际候选 ${candidateResult.candidates.length} 只；数据来源包含 ${sourceSummary(candidateResult.candidates)}`,
+    );
 
     const client = new OpenAiCompatibleClient({
       baseUrl: config.baseUrl,
@@ -128,6 +154,8 @@ export class AiStockAgentService {
       timeoutMs: config.timeoutMs,
     });
     const pickLimit = requestedPickLimit(query);
+    progress('prompt', '生成筛选提示词', `目标返回最多 ${pickLimit} 只；只允许模型从候选池中选择，并要求输出严格 JSON`);
+    progress('model', '调用 AI 模型', '正在等待模型基于候选池给出推荐理由、匹配规则和风险提示');
     const payload = (await client.completeJson({
       temperature: 0.15,
       maxTokens: 1800,
@@ -137,11 +165,14 @@ export class AiStockAgentService {
       ],
     })) as ModelPickPayload;
 
+    progress('validate', '校验模型输出', '正在过滤候选池之外的代码、重复项和无效字段');
     const picks = this.validatePicks(payload, candidateResult.candidates).slice(0, pickLimit);
+    progress('done', '筛选完成', `有效结果 ${picks.length} 只，已附带匹配规则和风险说明`);
     return {
       summary: typeof payload.summary === 'string' && payload.summary.trim() ? payload.summary.trim() : '已完成筛选',
       picks,
       warnings: [...candidateResult.warnings, ...textArray(payload.warnings)],
+      steps,
       providerLabel: config.providerLabel,
       model: config.model,
       candidateCount: candidateResult.candidates.length,
@@ -203,4 +234,29 @@ export class AiStockAgentService {
     }
     return out;
   }
+}
+
+function scopeLabel(scope: AiCandidateScope): string {
+  switch (scope) {
+    case 'activeGroup':
+      return '当前分组';
+    case 'allWatchlist':
+      return '全部自选';
+    case 'hotMarket':
+      return '市场热门';
+    case 'mixed':
+      return '自选 + 市场热门';
+    default:
+      return scope;
+  }
+}
+
+function sourceSummary(candidates: AiStockCandidate[]): string {
+  const counts = new Map<string, number>();
+  for (const c of candidates) {
+    counts.set(c.source, (counts.get(c.source) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([source, count]) => `${source} ${count} 只`)
+    .join('、');
 }
