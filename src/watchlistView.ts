@@ -1272,12 +1272,12 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       position: absolute;
       pointer-events: none;
       z-index: 3;
-      background: rgba(30,30,30,0.92);
-      color: #e0e0e0;
+      background: var(--vscode-editorWidget-background, rgba(30,30,30,0.92));
+      color: var(--vscode-editorWidget-foreground, #e0e0e0);
       font-size: 11px;
       line-height: 1.55;
       padding: 3px 7px;
-      border: 1px solid rgba(128,128,128,0.3);
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
       white-space: nowrap;
       font-variant-numeric: tabular-nums;
       display: none;
@@ -1898,6 +1898,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       let hasAvgPath = false;
       ctx.strokeStyle = avgColor;
       ctx.lineWidth = 1.2;
+      ctx.lineJoin = 'round';
+      ctx.setLineDash([5, 3]);
       ctx.beginPath();
       series.points.forEach((p, idx) => {
         if (!Number.isFinite(p.avgPrice)) return;
@@ -1910,14 +1912,17 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
           ctx.lineTo(x, y);
         }
       });
-      if (hasAvgPath) ctx.stroke();
+      if (hasAvgPath) { ctx.stroke(); }
+      ctx.setLineDash([]);
 
       ctx.strokeStyle = priceColor;
       ctx.lineWidth = 1.6;
+      ctx.lineJoin = 'round';
       ctx.beginPath();
       series.points.forEach((p, idx) => {
         const x = toX(idx);
         const y = toY(Number(p.price));
+        if (!Number.isFinite(y)) return;
         if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.stroke();
@@ -1932,9 +1937,27 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
         ctx.fill();
       }
 
-      ctx.fillStyle = labelColor;
       ctx.font = '10px sans-serif';
       ctx.textBaseline = 'top';
+      const legendX = left + 4;
+      const legendY = top + 2;
+      ctx.fillStyle = priceColor;
+      ctx.fillRect(legendX, legendY, 14, 2);
+      ctx.fillStyle = fg;
+      ctx.fillText('价格', legendX + 18, legendY - 1);
+      if (hasAvgPath) {
+        ctx.strokeStyle = avgColor;
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([5, 3]);
+        ctx.beginPath();
+        ctx.moveTo(legendX, legendY + 14);
+        ctx.lineTo(legendX + 14, legendY + 14);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillText('均价', legendX + 18, legendY + 11);
+      }
+
+      ctx.fillStyle = labelColor;
       const bottomLabels = [
         { label: '09:30', offset: 0, align: 'left' },
         { label: '10:30', offset: 60, align: 'center' },
@@ -2024,6 +2047,39 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       octx.stroke();
       octx.setLineDash([]);
 
+      let ay = null;
+      if (Number.isFinite(point.avgPrice)) {
+        ay = toY(Number(point.avgPrice));
+      }
+
+      // 右侧Y轴价格标签
+      octx.font = 'bold 11px "Segoe UI", sans-serif';
+      octx.textBaseline = 'middle';
+      const priceLabel = Number(point.price).toFixed(2);
+      const plw = octx.measureText(priceLabel).width + 10;
+      const labelRight = cssWidth - 4;
+      const labelLeft = labelRight - plw;
+      const labelTop = Math.max(top, py - 9);
+      const labelBot = Math.min(bottom, py + 9);
+      const labelMid = (labelTop + labelBot) / 2;
+      octx.fillStyle = priceColor;
+      octx.fillRect(labelLeft, labelTop, plw, labelBot - labelTop);
+      octx.fillStyle = '#fff';
+      octx.fillText(priceLabel, labelLeft + 5, labelMid);
+
+      if (ay !== null) {
+        const avgLabel = Number(point.avgPrice).toFixed(2);
+        octx.font = '11px "Segoe UI", sans-serif';
+        const alw = octx.measureText(avgLabel).width + 10;
+        const aTop = Math.max(top, ay - 9);
+        const aBot = Math.min(bottom, ay + 9);
+        const aMid = (aTop + aBot) / 2;
+        octx.fillStyle = avgColor;
+        octx.fillRect(labelRight - alw, aTop, alw, aBot - aTop);
+        octx.fillStyle = '#fff';
+        octx.fillText(avgLabel, labelRight - alw + 5, aMid);
+      }
+
       // 价格圆点
       octx.fillStyle = priceColor;
       octx.beginPath();
@@ -2034,9 +2090,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       octx.stroke();
 
       // 均线圆点
-      let ay = null;
-      if (Number.isFinite(point.avgPrice)) {
-        ay = toY(Number(point.avgPrice));
+      if (ay !== null) {
         octx.fillStyle = avgColor;
         octx.beginPath();
         octx.arc(px, ay, 2.6, 0, Math.PI * 2);
