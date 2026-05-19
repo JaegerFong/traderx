@@ -726,7 +726,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
   private async postIntradaySeries(code: NormalizedCode): Promise<void> {
     const cached = this.intradayCache.get(code);
     const now = Date.now();
-    if (cached?.data && now - cached.updatedAt < 30_000) {
+    if (cached?.data && now - cached.updatedAt < 2_000) {
       this.postMessageAll({ type: 'intradaySeries', code, data: cached.data, updatedAt: cached.updatedAt });
       return;
     }
@@ -1268,19 +1268,27 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       pointer-events: none;
       z-index: 2;
     }
-    .intraday-tooltip {
-      position: absolute;
-      pointer-events: none;
-      z-index: 3;
-      background: var(--vscode-editorWidget-background, rgba(30,30,30,0.92));
-      color: var(--vscode-editorWidget-foreground, #e0e0e0);
-      font-size: 11px;
-      line-height: 1.55;
-      padding: 3px 7px;
-      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
-      white-space: nowrap;
+    .intraday-crosshair-info {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+      margin-left: auto;
       font-variant-numeric: tabular-nums;
-      display: none;
+    }
+    .intraday-crosshair-time {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+    }
+    .intraday-crosshair-price {
+      font-size: 18px;
+      line-height: 1;
+      font-weight: 700;
+      letter-spacing: .01em;
+    }
+    .intraday-crosshair-change {
+      font-size: 12px;
+      font-weight: 700;
     }
     .intraday-foot {
       margin-top: 6px;
@@ -1460,6 +1468,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
     let lastMetaText = '';
     let intradayOpenCode = '';
     let intradayChartMetrics = null;
+    let intradayRefreshTimer = null;
     const intradaySeries = new Map();
     const intradayLoading = new Set();
     const intradayErrors = new Map();
@@ -1827,7 +1836,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       const labelColor = getComputedStyle(document.documentElement).getPropertyValue('--vscode-descriptionForeground').trim() || fg;
       const changePct = getSeriesChangePct(series);
       const priceColor = changePct !== null && changePct < 0 ? '#3fb950' : '#f14c4c';
-      const avgColor = '#4c8dff';
+      const avgColor = '#ffb800';
+      const priceLineColor = '#ffffff';
 
       let minPrice = range.min;
       let maxPrice = range.max;
@@ -1857,13 +1867,50 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       }
       ctx.setLineDash([]);
 
-      const verticalMarks = [
-        { label: '10:30', offset: 60 },
-        { label: '11:30/13:00', offset: 120 },
-        { label: '14:00', offset: 180 },
-      ];
-      for (const mark of verticalMarks) {
-        const x = left + (mark.offset / 240) * width;
+      // 动态计算下午横轴范围：根据数据实际时间 + 当前时间决定右边界
+      let maxDataOffset = 0;
+      for (const p of series.points) {
+        const o = tradingMinuteOffset(p.timeLabel);
+        if (o !== null && o > maxDataOffset) maxDataOffset = o;
+      }
+      const nowMinute = new Date().getHours() * 60 + new Date().getMinutes();
+      let nowOffset = 0;
+      if (nowMinute <= 570) nowOffset = 0;
+      else if (nowMinute <= 690) nowOffset = nowMinute - 570;
+      else if (nowMinute < 780) nowOffset = 120;
+      else if (nowMinute <= 900) nowOffset = 120 + (nowMinute - 780);
+      else nowOffset = 240;
+      const hasAfternoon = maxDataOffset > 120 || nowMinute >= 780;
+      const afternoonEnd = hasAfternoon ? Math.min(240, Math.max(maxDataOffset, nowOffset, 120) + 8) : 120;
+      const sessionGap = hasAfternoon ? 12 : 0;
+      const morningWidth = hasAfternoon ? Math.max(1, (width - sessionGap) / 2) : width;
+      const afternoonStartX = left + morningWidth + sessionGap;
+      const afternoonSpan = Math.max(1, afternoonEnd - 120);
+
+      const total = Math.max(1, series.points.length - 1);
+      const toX = (idx) => {
+        const point = series.points[idx];
+        const offset = tradingMinuteOffset(point?.timeLabel);
+        if (offset === null) {
+          return left + (idx / total) * width;
+        }
+        if (offset <= 120) {
+          return left + (offset / 120) * morningWidth;
+        }
+        if (!hasAfternoon) return right;
+        return afternoonStartX + ((offset - 120) / afternoonSpan) * morningWidth;
+      };
+
+      const verticalMarkXs = [];
+      verticalMarkXs.push(left + morningWidth * 0.5); // 10:30
+      if (hasAfternoon) {
+        verticalMarkXs.push(left + morningWidth);                   // 上午结束
+        verticalMarkXs.push(afternoonStartX);                       // 下午开始
+        if (afternoonEnd >= 180) {
+          verticalMarkXs.push(afternoonStartX + morningWidth * 0.5); // 14:00
+        }
+      }
+      for (const x of verticalMarkXs) {
         ctx.strokeStyle = axis;
         ctx.lineWidth = 1;
         ctx.setLineDash([3, 3]);
@@ -1883,21 +1930,49 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
         ctx.lineTo(right, y);
         ctx.stroke();
       }
-
-      const total = Math.max(1, series.points.length - 1);
-      const toX = (idx) => {
-        const point = series.points[idx];
-        const offset = tradingMinuteOffset(point?.timeLabel);
-        if (offset === null) {
-          return left + (idx / total) * width;
-        }
-        return left + (offset / 240) * width;
-      };
       const toY = (price) => top + ((maxPrice - price) / priceSpan) * height;
 
+      // 填充区域 & 价格线（按午休分段）
+      const preCloseY = preClose !== null ? toY(preClose) : null;
+      const upFill = 'rgba(241, 76, 76, 0.12)';
+      const downFill = 'rgba(63, 185, 80, 0.12)';
+
+      const segments = [];
+      let segStart = 0;
+      for (let i = 1; i < series.points.length; i++) {
+        const prevMin = parseHmToMinute(series.points[i - 1].timeLabel);
+        const curMin = parseHmToMinute(series.points[i].timeLabel);
+        if (prevMin !== null && curMin !== null && prevMin <= 690 && curMin >= 780) {
+          segments.push({ start: segStart, end: i - 1 });
+          segStart = i;
+        }
+      }
+      segments.push({ start: segStart, end: series.points.length - 1 });
+
+      for (const seg of segments) {
+        if (seg.start > seg.end || seg.end - seg.start < 1) continue;
+        if (preCloseY !== null && preClose !== null) {
+          ctx.beginPath();
+          ctx.moveTo(toX(seg.start), toY(Number(series.points[seg.start].price)));
+          for (let i = seg.start + 1; i <= seg.end; i++) {
+            const fx = toX(i);
+            const fy = toY(Number(series.points[i].price));
+            if (Number.isFinite(fy)) ctx.lineTo(fx, fy);
+          }
+          const segLastX = toX(seg.end);
+          ctx.lineTo(segLastX, preCloseY);
+          ctx.lineTo(toX(seg.start), preCloseY);
+          ctx.closePath();
+          const segLastPrice = Number(series.points[seg.end].price);
+          ctx.fillStyle = segLastPrice >= preClose ? upFill : downFill;
+          ctx.fill();
+        }
+      }
+
+      // 均价线（黄色虚线）
       let hasAvgPath = false;
       ctx.strokeStyle = avgColor;
-      ctx.lineWidth = 1.2;
+      ctx.lineWidth = 1.1;
       ctx.lineJoin = 'round';
       ctx.setLineDash([5, 3]);
       ctx.beginPath();
@@ -1905,49 +1980,73 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
         if (!Number.isFinite(p.avgPrice)) return;
         const x = toX(idx);
         const y = toY(Number(p.avgPrice));
-        if (!hasAvgPath) {
-          ctx.moveTo(x, y);
-          hasAvgPath = true;
-        } else {
-          ctx.lineTo(x, y);
+        if (hasAvgPath && idx > 0) {
+          const prev = series.points[idx - 1];
+          const prevMin = parseHmToMinute(prev.timeLabel);
+          const curMin = parseHmToMinute(p.timeLabel);
+          if (prevMin !== null && curMin !== null && prevMin <= 690 && curMin >= 780) {
+            ctx.stroke();
+            ctx.beginPath();
+            hasAvgPath = false;
+          }
         }
+        if (!hasAvgPath) { ctx.moveTo(x, y); hasAvgPath = true; }
+        else { ctx.lineTo(x, y); }
       });
       if (hasAvgPath) { ctx.stroke(); }
       ctx.setLineDash([]);
 
-      ctx.strokeStyle = priceColor;
-      ctx.lineWidth = 1.6;
+      // 价格线（白色）
+      ctx.strokeStyle = priceLineColor;
+      ctx.lineWidth = 1.4;
       ctx.lineJoin = 'round';
       ctx.beginPath();
+      let pricePathStarted = false;
       series.points.forEach((p, idx) => {
         const x = toX(idx);
         const y = toY(Number(p.price));
         if (!Number.isFinite(y)) return;
-        if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        if (pricePathStarted && idx > 0) {
+          const prev = series.points[idx - 1];
+          const prevMin = parseHmToMinute(prev.timeLabel);
+          const curMin = parseHmToMinute(p.timeLabel);
+          if (prevMin !== null && curMin !== null && prevMin <= 690 && curMin >= 780) {
+            ctx.stroke();
+            ctx.beginPath();
+            pricePathStarted = false;
+          }
+        }
+        if (!pricePathStarted) { ctx.moveTo(x, y); pricePathStarted = true; }
+        else { ctx.lineTo(x, y); }
       });
-      ctx.stroke();
+      if (pricePathStarted) ctx.stroke();
 
+      // 末尾圆点（红涨绿跌）
       const last = series.points[series.points.length - 1];
       if (last) {
         const x = toX(series.points.length - 1);
         const y = toY(Number(last.price));
         ctx.fillStyle = priceColor;
         ctx.beginPath();
-        ctx.arc(x, y, 2.8, 0, Math.PI * 2);
+        ctx.arc(x, y, 3.2, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
       }
 
+      // 图例
       ctx.font = '10px sans-serif';
       ctx.textBaseline = 'top';
       const legendX = left + 4;
       const legendY = top + 2;
-      ctx.fillStyle = priceColor;
+      ctx.fillStyle = priceLineColor;
       ctx.fillRect(legendX, legendY, 14, 2);
       ctx.fillStyle = fg;
       ctx.fillText('价格', legendX + 18, legendY - 1);
       if (hasAvgPath) {
         ctx.strokeStyle = avgColor;
-        ctx.lineWidth = 1.2;
+        ctx.lineWidth = 1.1;
         ctx.setLineDash([5, 3]);
         ctx.beginPath();
         ctx.moveTo(legendX, legendY + 14);
@@ -1959,16 +2058,25 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
 
       ctx.fillStyle = labelColor;
       const bottomLabels = [
-        { label: '09:30', offset: 0, align: 'left' },
-        { label: '10:30', offset: 60, align: 'center' },
-        { label: '11:30/13:00', offset: 120, align: 'center' },
-        { label: '14:00', offset: 180, align: 'center' },
-        { label: '15:00', offset: 240, align: 'right' },
+        { label: '09:30', x: left, align: 'left' },
+        { label: '10:30', x: left + morningWidth * 0.5, align: 'center' },
+        { label: '11:30', x: left + morningWidth, align: 'right' },
       ];
+      if (hasAfternoon) {
+        bottomLabels.push({ label: '13:00', x: afternoonStartX, align: 'left' });
+        if (afternoonEnd >= 180) {
+          bottomLabels.push({ label: '14:00', x: afternoonStartX + morningWidth * 0.5, align: 'center' });
+        }
+        const endAbsMinute = 660 + afternoonEnd;
+        const rounded = Math.ceil(endAbsMinute / 10) * 10;
+        const hh = Math.floor(rounded / 60);
+        const mm = rounded % 60;
+        const endLabel = String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
+        bottomLabels.push({ label: endLabel, x: right, align: 'right' });
+      }
       for (const item of bottomLabels) {
-        const x = left + (item.offset / 240) * width;
         const w = ctx.measureText(item.label).width;
-        const drawX = item.align === 'left' ? x : item.align === 'right' ? x - w : x - w / 2;
+        const drawX = item.align === 'left' ? item.x + 2 : item.align === 'right' ? item.x - w - 2 : item.x - w / 2;
         ctx.fillText(item.label, drawX, cssHeight - 16);
       }
 
@@ -1995,7 +2103,8 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       const { left, top, right, bottom, toX, toY, preClose, priceColor, avgColor, cssWidth, cssHeight, series } = metrics;
 
       const overlay = document.querySelector('#intradayMount canvas[data-intraday-overlay]');
-      const tooltip = document.querySelector('#intradayMount div[data-intraday-tooltip]');
+      const crosshairInfo = document.querySelector('#intradayMount span[data-intraday-crosshair-info]');
+      const statEl = document.querySelector('#intradayMount .intraday-stat');
       if (!overlay) return null;
 
       if (mouseX < left || mouseX > right || mouseY < top || mouseY > bottom) {
@@ -2027,7 +2136,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       const py = toY(Number(point.price));
       const axis = getComputedStyle(document.documentElement).getPropertyValue('--vscode-panel-border').trim() || 'rgba(127,127,127,.35)';
 
-      // 竖线上
+      // 竖线
       octx.strokeStyle = axis;
       octx.lineWidth = 0.8;
       octx.setLineDash([3, 4]);
@@ -2052,34 +2161,6 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
         ay = toY(Number(point.avgPrice));
       }
 
-      // 右侧Y轴价格标签
-      octx.font = 'bold 11px "Segoe UI", sans-serif';
-      octx.textBaseline = 'middle';
-      const priceLabel = Number(point.price).toFixed(2);
-      const plw = octx.measureText(priceLabel).width + 10;
-      const labelRight = cssWidth - 4;
-      const labelLeft = labelRight - plw;
-      const labelTop = Math.max(top, py - 9);
-      const labelBot = Math.min(bottom, py + 9);
-      const labelMid = (labelTop + labelBot) / 2;
-      octx.fillStyle = priceColor;
-      octx.fillRect(labelLeft, labelTop, plw, labelBot - labelTop);
-      octx.fillStyle = '#fff';
-      octx.fillText(priceLabel, labelLeft + 5, labelMid);
-
-      if (ay !== null) {
-        const avgLabel = Number(point.avgPrice).toFixed(2);
-        octx.font = '11px "Segoe UI", sans-serif';
-        const alw = octx.measureText(avgLabel).width + 10;
-        const aTop = Math.max(top, ay - 9);
-        const aBot = Math.min(bottom, ay + 9);
-        const aMid = (aTop + aBot) / 2;
-        octx.fillStyle = avgColor;
-        octx.fillRect(labelRight - alw, aTop, alw, aBot - aTop);
-        octx.fillStyle = '#fff';
-        octx.fillText(avgLabel, labelRight - alw + 5, aMid);
-      }
-
       // 价格圆点
       octx.fillStyle = priceColor;
       octx.beginPath();
@@ -2100,37 +2181,26 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
         octx.stroke();
       }
 
-      // tooltip
-      if (tooltip) {
+      // 更新右上角面板
+      if (crosshairInfo) {
         const price = Number(point.price);
         const change = preClose !== null && Number.isFinite(preClose) && preClose > 0 ? price - preClose : null;
         const changePct = change !== null ? (change / preClose) * 100 : null;
-        let html = '<div style="margin-bottom:2px;font-weight:600">' + point.timeLabel + '</div>';
-        html += '<div>' + fmtNum(price, 2);
-        if (change !== null) {
-          const sign = change > 0 ? '+' : '';
-          html += '  <span style="color:' + (change >= 0 ? '#f14c4c' : '#3fb950') + '">' + sign + change.toFixed(2) + '  ' + (changePct >= 0 ? '+' : '') + changePct.toFixed(2) + '%</span>';
-        }
-        html += '</div>';
-        if (ay !== null && Number.isFinite(point.avgPrice)) {
-          html += '<div style="color:#4c8dff">' + fmtNum(Number(point.avgPrice), 2) + '</div>';
-        }
-        tooltip.innerHTML = html;
-        tooltip.style.display = '';
-        const wrap = document.querySelector('#intradayMount .intraday-chart-wrap');
-        const wrapRect = wrap ? wrap.getBoundingClientRect() : null;
-        if (wrapRect) {
-          let tx = px + 12;
-          let ty = py - 8;
-          const tw = tooltip.offsetWidth;
-          const th = tooltip.offsetHeight;
-          if (tx + tw > cssWidth - 4) tx = px - tw - 10;
-          if (tx < 4) tx = 4;
-          if (ty - th < 4) ty = py + 14;
-          if (ty + th > cssHeight - 4) ty = cssHeight - th - 4;
-          tooltip.style.left = tx + 'px';
-          tooltip.style.top = ty + 'px';
-        }
+        const cls = changePct !== null ? (changePct >= 0 ? 'up' : 'down') : '';
+        const sign = change !== null && change > 0 ? '+' : '';
+        const changeText = change !== null ? sign + change.toFixed(2) : '--';
+        const pctText = changePct !== null ? (changePct >= 0 ? '+' : '') + changePct.toFixed(2) + '%' : '--';
+
+        crosshairInfo.querySelector('.intraday-crosshair-time').textContent = point.timeLabel;
+        const priceEl = crosshairInfo.querySelector('.intraday-crosshair-price');
+        priceEl.textContent = price.toFixed(2);
+        priceEl.className = 'intraday-crosshair-price ' + cls;
+        const changeEl = crosshairInfo.querySelector('.intraday-crosshair-change');
+        changeEl.textContent = changeText + '  ' + pctText;
+        changeEl.className = 'intraday-crosshair-change ' + cls;
+
+        crosshairInfo.style.display = '';
+        if (statEl) statEl.style.display = 'none';
       }
 
       return point;
@@ -2142,8 +2212,10 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
         const ctx = overlay.getContext('2d');
         if (ctx) { const dpr = window.devicePixelRatio || 1; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, overlay.clientWidth || 300, overlay.clientHeight || 220); }
       }
-      const tooltip = document.querySelector('#intradayMount div[data-intraday-tooltip]');
-      if (tooltip) { tooltip.style.display = 'none'; tooltip.innerHTML = ''; }
+      const crosshairInfo = document.querySelector('#intradayMount span[data-intraday-crosshair-info]');
+      const statEl = document.querySelector('#intradayMount .intraday-stat');
+      if (crosshairInfo) crosshairInfo.style.display = 'none';
+      if (statEl) statEl.style.display = '';
     }
 
     function wireIntradayHover(mount) {
@@ -2201,11 +2273,15 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
         +         '<span>' + openLabel + '</span>'
         +       '</span>'
         +     '</span>'
+        +     '<span class="intraday-crosshair-info" data-intraday-crosshair-info style="display:none">'
+        +       '<span class="intraday-crosshair-time"></span>'
+        +       '<span class="intraday-crosshair-price"></span>'
+        +       '<span class="intraday-crosshair-change"></span>'
+        +     '</span>'
         +   '</div>'
         +   '<div class="intraday-chart-wrap">'
         +     '<canvas class="intraday-canvas" data-intraday-canvas="' + code + '"></canvas>'
         +     '<canvas class="intraday-overlay" data-intraday-overlay="' + code + '"></canvas>'
-        +     '<div class="intraday-tooltip" data-intraday-tooltip="' + code + '"></div>'
         +   '</div>'
         +   '<div class="intraday-foot">'
         +     '<span>\u6574\u65e5\u4ea4\u6613\u65f6\u6bb5\u5c55\u793a ? ' + (hasAvg ? '\u84dd\u7ebf\u4e3a\u5747\u4ef7' : '\u6682\u65e0\u5747\u4ef7\u7ebf') + '</span>'
@@ -2221,12 +2297,14 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       if (!intradayOpenCode) {
         panel.hidden = true;
         mount.replaceChildren();
+        if (intradayRefreshTimer) { clearInterval(intradayRefreshTimer); intradayRefreshTimer = null; }
         return;
       }
       const row = rows.find((it) => it.code === intradayOpenCode);
       if (!row) {
         panel.hidden = true;
         mount.replaceChildren();
+        if (intradayRefreshTimer) { clearInterval(intradayRefreshTimer); intradayRefreshTimer = null; }
         return;
       }
       panel.hidden = false;
@@ -2236,6 +2314,12 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
       if (canvas && series) {
         drawIntradayChart(canvas, series);
         wireIntradayHover(mount);
+      }
+      if (!intradayRefreshTimer) {
+        intradayRefreshTimer = setInterval(() => {
+          if (!intradayOpenCode) { clearInterval(intradayRefreshTimer); intradayRefreshTimer = null; return; }
+          vscode.postMessage({ type: 'requestIntraday', code: intradayOpenCode });
+        }, 3000);
       }
     }
 
@@ -2276,6 +2360,7 @@ export class WatchlistViewProvider implements vscode.WebviewViewProvider, vscode
         e.stopPropagation();
         intradayOpenCode = intradayOpenCode === r.code ? '' : r.code;
         intradayErrors.delete(r.code);
+        if (intradayRefreshTimer) { clearInterval(intradayRefreshTimer); intradayRefreshTimer = null; }
         if (intradayOpenCode === r.code) {
           intradayLoading.add(r.code);
           vscode.postMessage({ type: 'requestIntraday', code: r.code });
