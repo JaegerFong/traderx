@@ -38,6 +38,7 @@ export function openTraderxSettingsPanel(onSaved: () => void): void {
         intradayDisplayMode?: string;
         intradayPageProvider?: string;
         intradayStealthMode?: boolean;
+        statusBarEnabled?: boolean;
       }) => {
         if (msg.type !== 'save') {
           return;
@@ -50,6 +51,9 @@ export function openTraderxSettingsPanel(onSaved: () => void): void {
         }
         if (typeof msg.intradayStealthMode === 'boolean') {
           await cfg.update('intradayStealthMode', msg.intradayStealthMode, vscode.ConfigurationTarget.Global);
+        }
+        if (typeof msg.statusBarEnabled === 'boolean') {
+          await cfg.update('statusBar.enabled', msg.statusBarEnabled, vscode.ConfigurationTarget.Global);
         }
         if (msg.intradayDisplayMode === 'simpleBrowser' || msg.intradayDisplayMode === 'systemBrowser') {
           await cfg.update('intradayDisplayMode', msg.intradayDisplayMode, vscode.ConfigurationTarget.Global);
@@ -73,7 +77,9 @@ export function openTraderxSettingsPanel(onSaved: () => void): void {
     const displayMode = normalizeIntradayDisplayMode(rawMode);
     const pageProvider = normalizeStoredPageProvider(cfg.get<string>('intradayPageProvider'));
     const stealth = cfg.get<boolean>('intradayStealthMode') === true;
-    settingsPanel!.webview.html = buildSettingsHtml(sec, displayMode, pageProvider, stealth);
+    const statusBarEnabled = cfg.get<boolean>('statusBar.enabled') === true;
+    const statusBarStocks = cfg.get<string[]>('statusBar.stocks') ?? [];
+    settingsPanel!.webview.html = buildSettingsHtml(sec, displayMode, pageProvider, stealth, statusBarEnabled, statusBarStocks);
   };
 
   pushHtml();
@@ -84,9 +90,15 @@ function buildSettingsHtml(
   displayMode: IntradayDisplayMode,
   pageProvider: IntradayPageProvider,
   stealth: boolean,
+  statusBarEnabled: boolean,
+  statusBarStocks: string[],
 ): string {
   const nonce = String(Math.random()).slice(2);
   const stealthChecked = stealth ? 'checked' : '';
+  const statusBarChecked = statusBarEnabled ? 'checked' : '';
+  const statusBarStocksDisplay = statusBarStocks.length > 0
+    ? statusBarStocks.filter(Boolean).join('、')
+    : '（暂无，点击底部状态栏或 VS Code 设置添加）';
   const sel = (value: string, options: { v: string; t: string }[]): string =>
     options.map((o) => `<option value="${o.v}"${o.v === value ? ' selected' : ''}>${o.t}</option>`).join('');
   const settingsMain = `
@@ -111,6 +123,12 @@ function buildSettingsHtml(
     { v: 'eastmoney_full', t: '东方财富完整行情（PC 个股页）' },
     { v: 'eastmoney_discreet', t: '东方财富低调分时页' },
   ])}</select>
+  <label>底部状态栏</label>
+  <div class="row">
+    <input type="checkbox" id="statusBar" ${statusBarChecked} />
+    <span>在底部状态栏展示指定股票涨跌</span>
+  </div>
+  <p class="hint">当前股票：${statusBarStocksDisplay}<br>点击状态栏股票项可搜索添加/更换，也可在 VS Code 设置中编辑 traderx.statusBar.stocks。</p>
   <button id="save">保存</button>`;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -207,9 +225,10 @@ function buildSettingsHtml(
     document.getElementById('save').onclick = () => {
       const v = Number(document.getElementById('sec').value);
       const intradayStealthMode = document.getElementById('stealth').checked;
+      const statusBarEnabled = document.getElementById('statusBar').checked;
       const intradayDisplayMode = document.getElementById('mode').value;
       const intradayPageProvider = document.getElementById('site').value;
-      vscode.postMessage({ type: 'save', refreshIntervalSeconds: v, intradayStealthMode, intradayDisplayMode, intradayPageProvider });
+      vscode.postMessage({ type: 'save', refreshIntervalSeconds: v, intradayStealthMode, statusBarEnabled, intradayDisplayMode, intradayPageProvider });
     };
   </script>
 </body>

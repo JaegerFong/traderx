@@ -18,12 +18,14 @@ import { openAiStockPanel } from './aiStockPanel';
 import { AiCandidateProvider } from './ai/candidateProvider';
 import { clearAiApiKey, readAiRuntimeConfig, saveAiApiKey } from './ai/config';
 import { AiStockAgentService } from './ai/stockAgentService';
+import { StatusBarManager } from './statusBarManager';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const store = new WatchlistStore(context);
   await store.ready();
 
   const quoteService = new QuoteService();
+  const statusBar = new StatusBarManager(context, quoteService);
   const watchView = new WatchlistViewProvider(context, store, quoteService);
   context.subscriptions.push(watchView);
 

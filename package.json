@@ -2,7 +2,7 @@
   "name": "traderx",
   "displayName": "TraderX A股自选",
   "description": "A股自选行情、主力净流入与持仓盈亏（本地）",
-  "version": "0.5.34",
+  "version": "0.5.35",
   "publisher": "traderx",
   "engines": {
     "vscode": "^1.85.0"
@@ -38,6 +38,7 @@
     "onCommand:traderx.backToEditor",
     "onCommand:traderx.openExplorerView",
     "onCommand:traderx.dividend.addStock",
+    "onCommand:traderx.statusBar.pickStock",
     "onCommand:traderx.dividend.removeStock",
     "onCommand:traderx.dividend.refresh",
     "onCommand:traderx.dividend.openDetail",
@@ -177,6 +178,10 @@
         "title": "TraderX: 切换到资源管理器"
       },
       {
+        "command": "traderx.statusBar.pickStock",
+        "title": "TraderX: 选择状态栏股票"
+      },
+      {
         "command": "traderx.dividend.addStock",
         "title": "TraderX: 添加股息关注"
       },
@@ -268,6 +273,20 @@
           "minimum": 5000,
           "maximum": 120000,
           "description": "市场行情（全球股指/行业排行/资金流向）请求超时（毫秒）"
+        },
+        "traderx.statusBar.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "在底部状态栏显示指定股票的涨跌幅（最多 3 只）。点击状态栏项可搜索添加/更换股票"
+        },
+        "traderx.statusBar.stocks": {
+          "type": "array",
+          "default": [],
+          "maxItems": 3,
+          "items": {
+            "type": "string"
+          },
+          "description": "底部状态栏展示的股票代码（如 sh600519），最多 3 个。可通过点击状态栏项搜索添加/更换"
         },
         "traderx.dividend.refreshIntervalHours": {
           "type": "number",
